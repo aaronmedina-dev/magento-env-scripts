@@ -315,14 +315,14 @@ SELECT
   job_code AS 'Job',
   status AS 'Status',
   COUNT(*) AS 'Count',
-  COALESCE(messages, '(no message)') AS 'Message',
+  LEFT(COALESCE(messages, '(no message)'), 100) AS 'Message',
   MIN(scheduled_at) AS 'First Seen',
   MAX(scheduled_at) AS 'Last Seen'
 FROM cron_schedule
 WHERE job_code LIKE '%indexer%'
   AND status IN ('error', 'missed')
   AND scheduled_at >= '$CUTOFF'
-GROUP BY job_code, status, COALESCE(messages, '(no message)')
+GROUP BY job_code, status, LEFT(COALESCE(messages, '(no message)'), 100)
 ORDER BY COUNT(*) DESC, job_code
 LIMIT 20"
 
