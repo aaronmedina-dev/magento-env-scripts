@@ -40,12 +40,16 @@ Options:
   -v, --verbose              Show progress info (table count, sizes, timing)
   -h, --help                 Show this help
 
-n98-magerun2 Options (uses bin/n98 when available):
+n98-magerun2 Options (auto-detects bin/n98, bin/n98-magerun2.phar, etc.):
   --use-n98                  Use n98-magerun2 instead of mysqldump
   --strip GROUPS             Strip table groups (e.g., "@customers @trade @log")
                              Groups: @stripped @development @log @sessions
                                      @trade @customers @search @idx
   --anonymize                Anonymize PII data (requires GDPR module)
+
+  Auto-detection paths: bin/n98, bin/n98-magerun2, bin/n98-magerun2.phar,
+                        bin/magerun2, bin/magerun2.phar, vendor/bin/n98-magerun2,
+                        vendor/bin/n98-magerun2.phar, or global commands
 
 Examples (via run-remote.sh):
   # Full dump saved locally
@@ -254,20 +258,42 @@ fi
 if [[ "$USE_N98" -eq 1 ]]; then
   log "Using n98-magerun2 for dump..."
 
-  # Find n98 binary
+  # Find n98 binary (auto-detect common locations)
   N98_BIN=""
-  if [[ -x "bin/n98" ]]; then
-    N98_BIN="bin/n98"
-  elif [[ -x "bin/n98-magerun2" ]]; then
-    N98_BIN="bin/n98-magerun2"
-  elif command -v n98-magerun2 &>/dev/null; then
-    N98_BIN="n98-magerun2"
-  elif command -v n98 &>/dev/null; then
-    N98_BIN="n98"
+  N98_PATHS=(
+    "bin/n98"
+    "bin/n98-magerun2"
+    "bin/n98-magerun2.phar"
+    "bin/magerun2"
+    "bin/magerun2.phar"
+    "vendor/bin/n98-magerun2"
+    "vendor/bin/n98-magerun2.phar"
+    "vendor/bin/magerun2"
+  )
+
+  # Check local paths first
+  for path in "${N98_PATHS[@]}"; do
+    if [[ -x "$path" ]] || [[ -f "$path" ]]; then
+      N98_BIN="$path"
+      break
+    fi
+  done
+
+  # Fall back to global commands
+  if [[ -z "$N98_BIN" ]]; then
+    if command -v n98-magerun2 &>/dev/null; then
+      N98_BIN="n98-magerun2"
+    elif command -v n98 &>/dev/null; then
+      N98_BIN="n98"
+    elif command -v magerun2 &>/dev/null; then
+      N98_BIN="magerun2"
+    fi
   fi
 
   if [[ -z "$N98_BIN" ]]; then
-    echo "ERROR: n98-magerun2 not found. Tried: bin/n98, bin/n98-magerun2, n98-magerun2, n98" >&2
+    echo "ERROR: n98-magerun2 not found." >&2
+    echo "Searched: ${N98_PATHS[*]}" >&2
+    echo "Also tried global commands: n98-magerun2, n98, magerun2" >&2
     exit 1
   fi
 

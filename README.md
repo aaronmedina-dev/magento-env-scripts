@@ -312,7 +312,23 @@ Flags
 
 n98-magerun2 Integration
 
-The script can use n98-magerun2 (bin/n98) for advanced features like PII stripping and anonymization.
+The script can use n98-magerun2 for advanced features like PII stripping and anonymization.
+
+**Auto-detection:** The script automatically searches for n98-magerun2 in these locations (in order):
+
+| Priority | Path |
+|----------|------|
+| 1 | `bin/n98` |
+| 2 | `bin/n98-magerun2` |
+| 3 | `bin/n98-magerun2.phar` |
+| 4 | `bin/magerun2` |
+| 5 | `bin/magerun2.phar` |
+| 6 | `vendor/bin/n98-magerun2` |
+| 7 | `vendor/bin/n98-magerun2.phar` |
+| 8 | `vendor/bin/magerun2` |
+| 9 | Global: `n98-magerun2` |
+| 10 | Global: `n98` |
+| 11 | Global: `magerun2` |
 
 **n98 Flags:**
 
