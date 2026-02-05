@@ -384,6 +384,47 @@ Notes
 - By default, ALL data is included. Use `--strip` or `--structure-only` to reduce dump size
 - Use `verify_dump.sh` to validate the dump after completion
 
+### check_log_tables.sh
+
+Analyzes log tables, indexer cron jobs, and log cleaner configuration for Adobe Commerce environments.
+
+What it checks
+
+1. **Log Table Sizes** - Common Magento log tables sorted by size with status indicators
+2. **Changelog Tables (_cl)** - Indexer changelog tables that track changes for "Update by Schedule" indexers
+3. **indexer_update_all_views Cron** - Status, history, and failed/missed jobs
+4. **Indexer & Mview Status** - Current indexer states and mview configuration
+5. **Log Cleaner Configuration** - System log cleaning settings and related cron jobs
+6. **Summary & Recommendations** - Issues detected and actionable fixes
+
+Usage
+
+```bash
+# Direct SSH
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- -v' < check_log_tables.sh
+
+# Via run-remote.sh
+./run-remote.sh -p PROJECT_ID -e staging -s check_log_tables.sh -- -v
+
+# Check longer history (default: 72 hours)
+./run-remote.sh -p PROJECT_ID -e staging -s check_log_tables.sh -- --hours 168
+```
+
+Flags
+
+- `--root PATH` - Magento root directory
+- `--hours N` - Hours of cron history to check (default: 72)
+- `-v, --verbose` - Verbose output
+
+Common Issues Detected
+
+| Issue | Recommendation |
+|-------|----------------|
+| Large changelog tables (>100K rows) | `bin/magento indexer:reindex` |
+| Log cleaning disabled | `bin/magento config:set system/log/enabled 1` |
+| Failed indexer cron jobs | Check cron is running: `pgrep -f 'cron:run'` |
+| Large log tables (>1M rows) | Reduce retention or manual cleanup |
+
 ### verify_dump.sh
 
 Verifies a database dump file for integrity and completeness. Works on both macOS and Linux with `.sql` and `.sql.gz` files.
