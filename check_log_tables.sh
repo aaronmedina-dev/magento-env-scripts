@@ -12,6 +12,7 @@ set -Eeuo pipefail
 MAGENTO_ROOT=""
 VERBOSE=0
 HOURS=72
+SHOW_SQL=1
 
 usage() {
   cat <<EOF
@@ -22,6 +23,7 @@ Analyzes log tables, indexer cron jobs, and log cleaner configuration.
 Options:
   --root PATH              Magento root directory (default: current directory)
   --hours N                Hours of cron history to check (default: 72)
+  --no-sql                 Hide SQL queries from output
   -v, --verbose            Show verbose output
   -h, --help               Show this help
 
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
     --hours)
       HOURS="${2:-72}"
       shift 2
+      ;;
+    --no-sql)
+      SHOW_SQL=0
+      shift
       ;;
     -v|--verbose)
       VERBOSE=1
@@ -125,8 +131,19 @@ run_query_table() {
   mysql $MYSQL_OPTS -t -e "$1" "$DB_NAME" 2>/dev/null
 }
 
+# Helper to show SQL query
+show_sql() {
+  if [[ "$SHOW_SQL" -eq 1 ]]; then
+    echo "📋 SQL Query:"
+    echo "-----------------------------------------------------------"
+    echo "$1" | sed 's/^/   /'
+    echo "-----------------------------------------------------------"
+    echo ""
+  fi
+}
+
 echo "============================================================"
-echo "LOG TABLES & INDEXER ANALYSIS"
+echo "📊 LOG TABLES & INDEXER ANALYSIS"
 echo "============================================================"
 echo ""
 echo "Magento Root: $MAGENTO_ROOT"
@@ -139,7 +156,7 @@ echo ""
 # SECTION 1: Log Table Sizes
 # ============================================================
 echo "============================================================"
-echo "1. LOG TABLE SIZES"
+echo "1️⃣  LOG TABLE SIZES"
 echo "============================================================"
 echo ""
 echo "Common Magento log tables sorted by size (descending):"
@@ -171,21 +188,23 @@ LOG_TABLES=(
 # Build SQL for log tables
 LOG_TABLE_LIST=$(printf "'%s'," "${LOG_TABLES[@]}" | sed 's/,$//')
 
-run_query_table "
+SQL_LOG_TABLES="
 SELECT
   table_name AS 'Table',
   CONCAT(LPAD(FORMAT(ROUND((data_length + index_length) / 1024 / 1024, 2), 2), 10, ' '), ' MB') AS 'Size',
   LPAD(FORMAT(table_rows, 0), 15, ' ') AS 'Rows (approx)',
   CASE
-    WHEN table_rows > 1000000 THEN 'LARGE - Consider cleaning'
-    WHEN table_rows > 100000 THEN 'MEDIUM'
-    ELSE 'OK'
+    WHEN table_rows > 1000000 THEN '🔴 LARGE - Consider cleaning'
+    WHEN table_rows > 100000 THEN '🟡 MEDIUM'
+    ELSE '🟢 OK'
   END AS 'Status'
 FROM information_schema.tables
 WHERE table_schema = '$DB_NAME'
   AND table_name IN ($LOG_TABLE_LIST)
-ORDER BY (data_length + index_length) DESC
-"
+ORDER BY (data_length + index_length) DESC"
+
+show_sql "$SQL_LOG_TABLES"
+run_query_table "$SQL_LOG_TABLES"
 
 echo ""
 
@@ -193,46 +212,49 @@ echo ""
 # SECTION 2: Changelog (_cl) Table Sizes
 # ============================================================
 echo "============================================================"
-echo "2. INDEXER CHANGELOG TABLES (_cl)"
+echo "2️⃣  INDEXER CHANGELOG TABLES (_cl)"
 echo "============================================================"
 echo ""
 echo "Changelog tables track changes for indexers. Large tables may indicate"
 echo "indexer_update_all_views is not running or falling behind."
 echo ""
 
-run_query_table "
+SQL_CHANGELOG="
 SELECT
   table_name AS 'Changelog Table',
   CONCAT(LPAD(FORMAT(ROUND((data_length + index_length) / 1024 / 1024, 2), 2), 10, ' '), ' MB') AS 'Size',
   LPAD(FORMAT(table_rows, 0), 15, ' ') AS 'Rows (approx)',
   CASE
-    WHEN table_rows > 100000 THEN 'HIGH - Indexer may be behind'
-    WHEN table_rows > 10000 THEN 'ELEVATED'
-    ELSE 'OK'
+    WHEN table_rows > 100000 THEN '🔴 HIGH - Indexer may be behind'
+    WHEN table_rows > 10000 THEN '🟡 ELEVATED'
+    ELSE '🟢 OK'
   END AS 'Status'
 FROM information_schema.tables
 WHERE table_schema = '$DB_NAME'
   AND table_name LIKE '%_cl'
 ORDER BY (data_length + index_length) DESC
-LIMIT 30
-"
+LIMIT 30"
+
+show_sql "$SQL_CHANGELOG"
+run_query_table "$SQL_CHANGELOG"
 
 echo ""
 
 # Total changelog size
-CL_TOTAL=$(run_query "
+SQL_CL_TOTAL="
 SELECT CONCAT(ROUND(SUM(data_length + index_length) / 1024 / 1024, 2), ' MB')
 FROM information_schema.tables
-WHERE table_schema = '$DB_NAME' AND table_name LIKE '%_cl'
-")
-echo "Total changelog tables size: $CL_TOTAL"
+WHERE table_schema = '$DB_NAME' AND table_name LIKE '%_cl'"
+
+CL_TOTAL=$(run_query "$SQL_CL_TOTAL")
+echo "📦 Total changelog tables size: $CL_TOTAL"
 echo ""
 
 # ============================================================
 # SECTION 3: indexer_update_all_views Cron Job
 # ============================================================
 echo "============================================================"
-echo "3. INDEXER CRON JOB STATUS"
+echo "3️⃣  INDEXER CRON JOB STATUS"
 echo "============================================================"
 echo ""
 
@@ -256,7 +278,7 @@ echo "-----------------------------------------------------------"
 
 CUTOFF=$(date -d "-$HOURS hours" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-${HOURS}H '+%Y-%m-%d %H:%M:%S')
 
-run_query_table "
+SQL_RECENT_INDEXER="
 SELECT
   job_code AS 'Job',
   status AS 'Status',
@@ -267,39 +289,45 @@ FROM cron_schedule
 WHERE job_code LIKE '%indexer%'
   AND scheduled_at >= '$CUTOFF'
 GROUP BY job_code, status
-ORDER BY job_code, status
-"
+ORDER BY job_code, status"
+
+show_sql "$SQL_RECENT_INDEXER"
+run_query_table "$SQL_RECENT_INDEXER"
 
 echo ""
 echo "3.3 Failed/Missed Indexer Cron Jobs (last $HOURS hours):"
 echo "-----------------------------------------------------------"
 
-FAILED_COUNT=$(run_query "
+SQL_FAILED_COUNT="
 SELECT COUNT(*) FROM cron_schedule
 WHERE job_code LIKE '%indexer%'
   AND status IN ('error', 'missed')
-  AND scheduled_at >= '$CUTOFF'
-")
+  AND scheduled_at >= '$CUTOFF'"
+
+FAILED_COUNT=$(run_query "$SQL_FAILED_COUNT")
 
 if [[ "$FAILED_COUNT" -gt 0 ]]; then
-  echo "WARNING: $FAILED_COUNT failed/missed indexer jobs found"
+  echo "⚠️  WARNING: $FAILED_COUNT failed/missed indexer jobs found"
   echo ""
-  run_query_table "
-  SELECT
-    job_code AS 'Job',
-    status AS 'Status',
-    scheduled_at AS 'Scheduled',
-    executed_at AS 'Executed',
-    LEFT(messages, 80) AS 'Message'
-  FROM cron_schedule
-  WHERE job_code LIKE '%indexer%'
-    AND status IN ('error', 'missed')
-    AND scheduled_at >= '$CUTOFF'
-  ORDER BY scheduled_at DESC
-  LIMIT 20
-  "
+
+  SQL_FAILED_DETAILS="
+SELECT
+  job_code AS 'Job',
+  status AS 'Status',
+  scheduled_at AS 'Scheduled',
+  executed_at AS 'Executed',
+  LEFT(messages, 80) AS 'Message'
+FROM cron_schedule
+WHERE job_code LIKE '%indexer%'
+  AND status IN ('error', 'missed')
+  AND scheduled_at >= '$CUTOFF'
+ORDER BY scheduled_at DESC
+LIMIT 20"
+
+  show_sql "$SQL_FAILED_DETAILS"
+  run_query_table "$SQL_FAILED_DETAILS"
 else
-  echo "OK: No failed/missed indexer jobs in the last $HOURS hours"
+  echo "✅ OK: No failed/missed indexer jobs in the last $HOURS hours"
 fi
 
 echo ""
@@ -308,7 +336,7 @@ echo ""
 echo "3.4 Last Successful indexer_update_all_views:"
 echo "-----------------------------------------------------------"
 
-run_query_table "
+SQL_LAST_SUCCESS="
 SELECT
   job_code AS 'Job',
   status AS 'Status',
@@ -319,8 +347,10 @@ FROM cron_schedule
 WHERE job_code = 'indexer_update_all_views'
   AND status = 'success'
 ORDER BY finished_at DESC
-LIMIT 5
-"
+LIMIT 5"
+
+show_sql "$SQL_LAST_SUCCESS"
+run_query_table "$SQL_LAST_SUCCESS"
 
 echo ""
 
@@ -328,11 +358,11 @@ echo ""
 # SECTION 4: Indexer & Mview Status
 # ============================================================
 echo "============================================================"
-echo "4. INDEXER & MVIEW STATUS"
+echo "4️⃣  INDEXER & MVIEW STATUS"
 echo "============================================================"
 echo ""
 
-echo "4.1 Indexer Status:"
+echo "4.1 Indexer Status (bin/magento indexer:status):"
 echo "-----------------------------------------------------------"
 if [[ -x "bin/magento" ]]; then
   php bin/magento indexer:status 2>/dev/null || echo "  (Could not get indexer status)"
@@ -344,7 +374,7 @@ echo ""
 echo "4.2 Mview State (from mview_state table):"
 echo "-----------------------------------------------------------"
 
-run_query_table "
+SQL_MVIEW="
 SELECT
   view_id AS 'View ID',
   mode AS 'Mode',
@@ -352,21 +382,23 @@ SELECT
   version_id AS 'Version ID',
   updated AS 'Last Updated'
 FROM mview_state
-ORDER BY view_id
-"
+ORDER BY view_id"
+
+show_sql "$SQL_MVIEW"
+run_query_table "$SQL_MVIEW"
 
 echo ""
 
 # Check for indexers in 'Update by Schedule' mode
 SCHEDULE_COUNT=$(run_query "SELECT COUNT(*) FROM mview_state WHERE mode = 'enabled'")
-echo "Indexers in 'Update by Schedule' mode: $SCHEDULE_COUNT"
+echo "📌 Indexers in 'Update by Schedule' mode: $SCHEDULE_COUNT"
 echo ""
 
 # ============================================================
 # SECTION 5: Log Cleaner Configuration
 # ============================================================
 echo "============================================================"
-echo "5. LOG CLEANER CONFIGURATION"
+echo "5️⃣  LOG CLEANER CONFIGURATION"
 echo "============================================================"
 echo ""
 
@@ -378,25 +410,31 @@ if [[ -x "bin/magento" ]]; then
   LOG_ENABLED=$(php bin/magento config:show system/log/enabled 2>/dev/null || echo "not set")
   LOG_DAYS=$(php bin/magento config:show system/log/clean_after_day 2>/dev/null || echo "not set")
 
-  echo "  Log Cleaning Enabled: $LOG_ENABLED"
-  echo "  Clean Logs After Days: $LOG_DAYS"
+  if [[ "$LOG_ENABLED" == "1" ]]; then
+    echo "  ✅ Log Cleaning Enabled: $LOG_ENABLED"
+  else
+    echo "  ⚠️  Log Cleaning Enabled: $LOG_ENABLED"
+  fi
+  echo "  📅 Clean Logs After Days: $LOG_DAYS"
 
   if [[ "$LOG_ENABLED" != "1" ]]; then
     echo ""
-    echo "  WARNING: Log cleaning is NOT enabled!"
-    echo "  Enable with: bin/magento config:set system/log/enabled 1"
+    echo "  🔴 WARNING: Log cleaning is NOT enabled!"
+    echo "  💡 Enable with: bin/magento config:set system/log/enabled 1"
   fi
 else
   # Fallback to database query
-  run_query_table "
-  SELECT
-    path AS 'Config Path',
-    value AS 'Value',
-    scope AS 'Scope'
-  FROM core_config_data
-  WHERE path LIKE 'system/log/%'
-  ORDER BY path
-  "
+  SQL_LOG_CONFIG="
+SELECT
+  path AS 'Config Path',
+  value AS 'Value',
+  scope AS 'Scope'
+FROM core_config_data
+WHERE path LIKE 'system/log/%'
+ORDER BY path"
+
+  show_sql "$SQL_LOG_CONFIG"
+  run_query_table "$SQL_LOG_CONFIG"
 fi
 
 echo ""
@@ -406,16 +444,18 @@ echo "-----------------------------------------------------------"
 if [[ -x "bin/magento" ]]; then
   VISITOR_DAYS=$(php bin/magento config:show system/statistics/visitor_log_clean_after_day 2>/dev/null || echo "not set")
 
-  echo "  Visitor Log Clean After Days: $VISITOR_DAYS"
+  echo "  📅 Visitor Log Clean After Days: $VISITOR_DAYS"
 else
-  run_query_table "
-  SELECT
-    path AS 'Config Path',
-    value AS 'Value'
-  FROM core_config_data
-  WHERE path LIKE 'system/statistics/%'
-  ORDER BY path
-  "
+  SQL_STATS_CONFIG="
+SELECT
+  path AS 'Config Path',
+  value AS 'Value'
+FROM core_config_data
+WHERE path LIKE 'system/statistics/%'
+ORDER BY path"
+
+  show_sql "$SQL_STATS_CONFIG"
+  run_query_table "$SQL_STATS_CONFIG"
 fi
 
 echo ""
@@ -426,15 +466,15 @@ if [[ -x "bin/magento" ]]; then
   CRON_HISTORY_SUCCESS=$(php bin/magento config:show system/cron/default/history_success_lifetime 2>/dev/null || echo "not set (default: 60 min)")
   CRON_HISTORY_FAILURE=$(php bin/magento config:show system/cron/default/history_failure_lifetime 2>/dev/null || echo "not set (default: 600 min)")
 
-  echo "  Success History Lifetime: $CRON_HISTORY_SUCCESS"
-  echo "  Failure History Lifetime: $CRON_HISTORY_FAILURE"
+  echo "  ✅ Success History Lifetime: $CRON_HISTORY_SUCCESS"
+  echo "  ❌ Failure History Lifetime: $CRON_HISTORY_FAILURE"
 fi
 
 echo ""
 echo "5.4 Related Log Cleaning Cron Jobs:"
 echo "-----------------------------------------------------------"
 
-run_query_table "
+SQL_LOG_CRON="
 SELECT
   job_code AS 'Job',
   status AS 'Last Status',
@@ -449,8 +489,10 @@ WHERE job_code IN (
   'aggregate_sales_report_order_data'
 )
 GROUP BY job_code, status
-ORDER BY job_code
-"
+ORDER BY job_code"
+
+show_sql "$SQL_LOG_CRON"
+run_query_table "$SQL_LOG_CRON"
 
 echo ""
 
@@ -458,7 +500,7 @@ echo ""
 # SECTION 6: Summary & Recommendations
 # ============================================================
 echo "============================================================"
-echo "6. SUMMARY & RECOMMENDATIONS"
+echo "6️⃣  SUMMARY & RECOMMENDATIONS"
 echo "============================================================"
 echo ""
 
@@ -466,65 +508,69 @@ echo ""
 ISSUES=0
 
 # Check changelog tables
-CL_HIGH=$(run_query "
+SQL_CL_HIGH="
 SELECT COUNT(*) FROM information_schema.tables
 WHERE table_schema = '$DB_NAME'
   AND table_name LIKE '%_cl'
-  AND table_rows > 100000
-")
+  AND table_rows > 100000"
+
+CL_HIGH=$(run_query "$SQL_CL_HIGH")
 
 if [[ "$CL_HIGH" -gt 0 ]]; then
-  echo "[!!] $CL_HIGH changelog table(s) have >100K rows"
-  echo "     - indexer_update_all_views may not be running properly"
-  echo "     - Run: bin/magento indexer:reindex"
+  echo "🔴 $CL_HIGH changelog table(s) have >100K rows"
+  echo "   └─ indexer_update_all_views may not be running properly"
+  echo "   └─ 💡 Run: bin/magento indexer:reindex"
   echo ""
   ISSUES=$((ISSUES + 1))
 fi
 
 # Check for failed cron
 if [[ "$FAILED_COUNT" -gt 0 ]]; then
-  echo "[!!] $FAILED_COUNT failed/missed indexer cron jobs"
-  echo "     - Check cron is running: pgrep -f 'cron:run'"
-  echo "     - Check cron schedule: bin/magento cron:run --group=index"
+  echo "🔴 $FAILED_COUNT failed/missed indexer cron jobs"
+  echo "   └─ Check cron is running: pgrep -f 'cron:run'"
+  echo "   └─ 💡 Run: bin/magento cron:run --group=index"
   echo ""
   ISSUES=$((ISSUES + 1))
 fi
 
 # Check log cleaning
 if [[ "${LOG_ENABLED:-0}" != "1" ]]; then
-  echo "[!!] Log cleaning is NOT enabled"
-  echo "     - Enable: bin/magento config:set system/log/enabled 1"
-  echo "     - Set retention: bin/magento config:set system/log/clean_after_day 30"
+  echo "🔴 Log cleaning is NOT enabled"
+  echo "   └─ 💡 Enable: bin/magento config:set system/log/enabled 1"
+  echo "   └─ 💡 Set retention: bin/magento config:set system/log/clean_after_day 30"
   echo ""
   ISSUES=$((ISSUES + 1))
 fi
 
 # Check large log tables
-LARGE_LOGS=$(run_query "
+SQL_LARGE_LOGS="
 SELECT COUNT(*) FROM information_schema.tables
 WHERE table_schema = '$DB_NAME'
   AND table_name IN ($LOG_TABLE_LIST)
-  AND table_rows > 1000000
-")
+  AND table_rows > 1000000"
+
+LARGE_LOGS=$(run_query "$SQL_LARGE_LOGS")
 
 if [[ "$LARGE_LOGS" -gt 0 ]]; then
-  echo "[!!] $LARGE_LOGS log table(s) have >1M rows"
-  echo "     - Consider manual cleanup or reducing retention period"
-  echo "     - Check log cleaner cron jobs are running"
+  echo "🔴 $LARGE_LOGS log table(s) have >1M rows"
+  echo "   └─ Consider manual cleanup or reducing retention period"
+  echo "   └─ 💡 Check log cleaner cron jobs are running"
   echo ""
   ISSUES=$((ISSUES + 1))
 fi
 
 if [[ "$ISSUES" -eq 0 ]]; then
-  echo "[OK] No major issues detected"
+  echo "✅ No major issues detected"
   echo ""
 fi
 
-echo "General Recommendations:"
-echo "  1. Ensure cron is running every minute"
-echo "  2. Enable log cleaning: bin/magento config:set system/log/enabled 1"
-echo "  3. Set reasonable retention: bin/magento config:set system/log/clean_after_day 30"
-echo "  4. Monitor indexer status: bin/magento indexer:status"
-echo "  5. For large changelog tables, run: bin/magento indexer:reindex"
+echo "-----------------------------------------------------------"
+echo "📋 General Recommendations:"
+echo "-----------------------------------------------------------"
+echo "  1. 🕐 Ensure cron is running every minute"
+echo "  2. 🧹 Enable log cleaning: bin/magento config:set system/log/enabled 1"
+echo "  3. 📅 Set reasonable retention: bin/magento config:set system/log/clean_after_day 30"
+echo "  4. 📊 Monitor indexer status: bin/magento indexer:status"
+echo "  5. 🔄 For large changelog tables, run: bin/magento indexer:reindex"
 echo ""
 echo "============================================================"
