@@ -310,53 +310,24 @@ if [[ "$FAILED_COUNT" -gt 0 ]]; then
   echo "⚠️  WARNING: $FAILED_COUNT failed/missed indexer jobs found"
   echo ""
 
-  SQL_FAILED_SUMMARY="
+  SQL_FAILED_DETAILS="
 SELECT
   job_code AS 'Job',
   status AS 'Status',
   COUNT(*) AS 'Count',
+  COALESCE(messages, '(no message)') AS 'Message',
   MIN(scheduled_at) AS 'First Seen',
   MAX(scheduled_at) AS 'Last Seen'
 FROM cron_schedule
 WHERE job_code LIKE '%indexer%'
   AND status IN ('error', 'missed')
   AND scheduled_at >= '$CUTOFF'
-GROUP BY job_code, status
-ORDER BY COUNT(*) DESC, job_code"
+GROUP BY job_code, status, COALESCE(messages, '(no message)')
+ORDER BY COUNT(*) DESC, job_code
+LIMIT 20"
 
-  show_sql "$SQL_FAILED_SUMMARY"
-  run_query_table "$SQL_FAILED_SUMMARY"
-
-  echo ""
-  echo "📝 Unique Error Messages:"
-  echo "-----------------------------------------------------------"
-
-  SQL_FAILED_MESSAGES="
-SELECT DISTINCT
-  job_code AS 'Job',
-  status AS 'Status',
-  COALESCE(messages, '(no message)') AS 'Full Message'
-FROM cron_schedule
-WHERE job_code LIKE '%indexer%'
-  AND status IN ('error', 'missed')
-  AND scheduled_at >= '$CUTOFF'
-  AND messages IS NOT NULL
-  AND messages != ''
-ORDER BY job_code"
-
-  show_sql "$SQL_FAILED_MESSAGES"
-
-  # Use vertical format for full messages to avoid truncation
-  mysql $MYSQL_OPTS -e "$SQL_FAILED_MESSAGES" "$DB_NAME" 2>/dev/null | while IFS=$'\t' read -r job status message; do
-    if [[ "$job" != "Job" ]]; then
-      echo ""
-      echo "🔴 Job: $job"
-      echo "   Status: $status"
-      echo "   Message:"
-      echo "$message" | fold -w 100 -s | sed 's/^/      /'
-      echo ""
-    fi
-  done
+  show_sql "$SQL_FAILED_DETAILS"
+  run_query_table "$SQL_FAILED_DETAILS"
 else
   echo "✅ OK: No failed/missed indexer jobs in the last $HOURS hours"
 fi
