@@ -408,22 +408,46 @@ magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- -v' < check_log_tables
 
 # Check longer history (default: 72 hours)
 ./run-remote.sh -p PROJECT_ID -e staging -s check_log_tables.sh -- --hours 168
+
+# Hide SQL queries from output
+./run-remote.sh -p PROJECT_ID -e staging -s check_log_tables.sh -- --no-sql
 ```
 
 Flags
 
 - `--root PATH` - Magento root directory
 - `--hours N` - Hours of cron history to check (default: 72)
+- `--no-sql` - Hide SQL queries from output
 - `-v, --verbose` - Verbose output
+
+Status Indicators
+
+| Emoji | Meaning |
+|-------|---------|
+| 🔴 | Critical - needs immediate attention |
+| 🟡 | Elevated - monitor closely |
+| 🟢 | OK - healthy |
+| ✅ | Success/enabled |
+| ⚠️ | Warning |
+| 💡 | Recommendation/tip |
 
 Common Issues Detected
 
 | Issue | Recommendation |
 |-------|----------------|
-| Large changelog tables (>100K rows) | `bin/magento indexer:reindex` |
-| Log cleaning disabled | `bin/magento config:set system/log/enabled 1` |
-| Failed indexer cron jobs | Check cron is running: `pgrep -f 'cron:run'` |
-| Large log tables (>1M rows) | Reduce retention or manual cleanup |
+| 🔴 Large changelog tables (>100K rows) | `bin/magento indexer:reindex` |
+| 🔴 Log cleaning disabled | `bin/magento config:set system/log/enabled 1` |
+| 🔴 Failed indexer cron jobs | Check cron is running: `pgrep -f 'cron:run'` |
+| 🔴 Large log tables (>1M rows) | Reduce retention or manual cleanup |
+
+SQL Queries
+
+Each section displays the SQL query used to fetch the data. This helps with:
+- Understanding what data is being analyzed
+- Running queries manually for deeper investigation
+- Debugging and verification
+
+Use `--no-sql` to hide queries for cleaner output.
 
 ### verify_dump.sh
 
