@@ -314,14 +314,16 @@ if [[ "$FAILED_COUNT" -gt 0 ]]; then
 SELECT
   job_code AS 'Job',
   status AS 'Status',
-  scheduled_at AS 'Scheduled',
-  executed_at AS 'Executed',
-  LEFT(messages, 80) AS 'Message'
+  COUNT(*) AS 'Count',
+  LEFT(COALESCE(messages, '(no message)'), 100) AS 'Message',
+  MIN(scheduled_at) AS 'First Seen',
+  MAX(scheduled_at) AS 'Last Seen'
 FROM cron_schedule
 WHERE job_code LIKE '%indexer%'
   AND status IN ('error', 'missed')
   AND scheduled_at >= '$CUTOFF'
-ORDER BY scheduled_at DESC
+GROUP BY job_code, status, LEFT(COALESCE(messages, '(no message)'), 100)
+ORDER BY COUNT(*) DESC, job_code
 LIMIT 20"
 
   show_sql "$SQL_FAILED_DETAILS"
