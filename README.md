@@ -4,9 +4,71 @@ Utilities to validate, inspect, and compare Adobe Commerce (Magento 2.x) environ
 
 ## Getting Started
 
-- Run from a Magento project root so `bin/magento` and `app/etc/env.php` resolve. For dumps, you can also pass `--root`.
-- Requirements vary by script: `bash`, `php`, access to system logs and CLIs (`mysql`, `valkey-cli`/`redis-cli`, `rabbitmqctl`, `curl`, `systemctl`).
-- Safety: Scripts are read-only unless noted. They do NOT run `app:config:dump`.
+### Requirements
+
+- `bash`, `php`, access to system logs and CLIs (`mysql`, `valkey-cli`/`redis-cli`, `rabbitmqctl`, `curl`, `systemctl`)
+- For remote execution: `magento-cloud` CLI installed and authenticated
+
+### Running Scripts
+
+**Option 1: Using the utility wrapper (recommended for Adobe Commerce Cloud)**
+
+```bash
+./run-remote.sh --project PROJECT_ID --environment ENV --script SCRIPT_NAME [-- SCRIPT_ARGS]
+```
+
+**Option 2: Direct SSH piping**
+
+```bash
+magento-cloud ssh --project PROJECT_ID --environment ENV -- \
+  'bash -s -- [SCRIPT_ARGS]' < script_name.sh
+```
+
+**Option 3: Local execution (on the Magento server)**
+
+```bash
+cd /path/to/magento
+bash /path/to/script.sh [SCRIPT_ARGS]
+```
+
+### Safety
+
+Scripts are read-only unless noted. They do NOT run `app:config:dump` or modify configuration.
+
+## Utility Scripts
+
+### run-remote.sh
+
+Wrapper utility for running any script on Adobe Commerce Cloud environments. Handles SSH connection and argument passing.
+
+Usage
+
+```bash
+./run-remote.sh [OPTIONS] [-- SCRIPT_ARGS]
+
+Options:
+  --project, -p PROJECT      Magento Cloud project ID (required)
+  --environment, -e ENV      Environment name (required)
+  --script, -s SCRIPT        Script to run (required)
+  --output, -o FILE          Save output to local file
+  --verbose, -v              Show verbose output
+```
+
+Examples
+
+```bash
+# Run email review script
+./run-remote.sh -p abc123xyz -e staging -s review_email_sending.sh -- --hours 72
+
+# Run database dump and save locally
+./run-remote.sh -p abc123xyz -e staging -s dump_database.sh -o db_dump/staging.sql
+
+# Run audit script with output to file
+./run-remote.sh -p abc123xyz -e staging -s audit_magento_env.sh -o audit.txt
+
+# Compressed database dump
+./run-remote.sh -p abc123xyz -e staging -s dump_database.sh | gzip > db_dump/staging.sql.gz
+```
 
 ## Scripts
 
@@ -161,31 +223,21 @@ Data Sources & Status Meanings
 | Customer Registration | `customer_entity.confirmation` | NULL=confirmed, has value=pending |
 | B2B Company Users | `company_advanced_customer_entity.status` | 0=Inactive, 1=Active |
 
-Usage (local)
+Usage
 
 ```bash
+# Using run-remote.sh (recommended)
+./run-remote.sh -p PROJECT_ID -e staging -s review_email_sending.sh -- --hours 72
+
+# Save output to file
+./run-remote.sh -p PROJECT_ID -e staging -s review_email_sending.sh -o report.txt -- --hours 72
+
+# Direct SSH
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --root /app/PROJECT_stg --hours 24' < review_email_sending.sh
+
+# Local execution
 bash review_email_sending.sh --root /path/to/magento --hours 24
 ```
-
-Usage (remote via magento-cloud SSH)
-
-Run from your local machine and stream output directly:
-
-```bash
-# Full report to terminal
-magento-cloud ssh --project PROJECT_ID --environment ENV -- \
-  'bash -s -- --root /app/PROJECT_ENV --hours 24' < review_email_sending.sh
-
-# Full report saved to file
-magento-cloud ssh --project PROJECT_ID --environment ENV -- \
-  'bash -s -- --root /app/PROJECT_ENV --hours 72' < review_email_sending.sh > report.txt 2>&1
-
-# CSV only (report suppressed)
-magento-cloud ssh --project PROJECT_ID --environment ENV -- \
-  'bash -s -- --root /app/PROJECT_ENV --hours 24 --csv-only' < review_email_sending.sh > email_senders.csv
-```
-
-Replace `PROJECT_ID` with your project ID, `ENV` with environment (e.g., `staging`, `production`), and `PROJECT_ENV` with the Magento root path (typically `PROJECT_ID_ENV`, e.g., `abc123xyz_stg`).
 
 Flags
 
@@ -205,6 +257,167 @@ Notes
 - To verify actual email delivery on cloud: check email headers for `Received: from *.smtp.magentosite.cloud` or access SendGrid dashboard via Adobe Commerce Cloud Console.
 - Email debugging can be enabled via: `bin/magento config:set dev/debug/debug_logging 1`
 - Each run starts fresh (removes and recreates output directory).
+
+### dump_database.sh
+
+Creates a full database dump from Adobe Commerce Cloud and streams it to your local machine.
+
+Features
+
+- Streams dump directly to local (no temp files on remote)
+- Auto-extracts database credentials from environment
+- Removes DEFINER clauses for portability (default)
+- Support for excluding tables or dumping structure-only
+- Pipe-friendly output (works with gzip, pv, etc.)
+- n98-magerun2 integration for PII stripping and anonymization
+
+Usage
+
+Dumps are saved to the `db_dump/` folder (gitignored by default).
+
+```bash
+# Using run-remote.sh (recommended)
+./run-remote.sh -p PROJECT_ID -e staging -s dump_database.sh -o db_dump/staging.sql
+
+# Compressed dump
+./run-remote.sh -p PROJECT_ID -e staging -s dump_database.sh | gzip > db_dump/staging.sql.gz
+
+# With progress indicator (using pv)
+./run-remote.sh -p PROJECT_ID -e staging -s dump_database.sh | pv > db_dump/staging.sql
+
+# Exclude tables
+./run-remote.sh -p PROJECT_ID -e staging -s dump_database.sh -- --exclude-tables "search_query,report_event" | gzip > db_dump/staging.sql.gz
+
+# Direct SSH
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s' < dump_database.sh > db_dump/dump.sql
+
+# Direct SSH compressed
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s' < dump_database.sh | gzip > db_dump/dump.sql.gz
+
+# Verbose mode with progress info
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- -v' < dump_database.sh > db_dump/dump.sql
+
+# With local transfer progress using pv
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- -v' < dump_database.sh | pv | gzip > db_dump/dump.sql.gz
+```
+
+Flags
+
+- `--exclude-tables TABLES` - Comma-separated tables to exclude entirely
+- `--structure-only TABLES` - Tables to dump structure only (no default - all data included)
+- `--no-data` - Dump structure only (no data)
+- `--with-definer` - Keep DEFINER clauses (default: removed)
+- `--no-drop` - Don't add DROP TABLE statements
+- `-v, --verbose` - Show progress info (table count, sizes, elapsed time)
+
+n98-magerun2 Integration
+
+The script can use n98-magerun2 (bin/n98) for advanced features like PII stripping and anonymization.
+
+**n98 Flags:**
+
+- `--use-n98` - Use n98-magerun2 instead of mysqldump
+- `--strip GROUPS` - Strip table groups (structure only, no data)
+- `--anonymize` - Anonymize PII data before dump (requires GDPR module)
+
+**Available Strip Groups:**
+
+| Group | Description |
+|-------|-------------|
+| `@stripped` | Common tables to strip |
+| `@development` | Development-related tables |
+| `@log` | Log tables (report_event, search_query, etc.) |
+| `@sessions` | Session data |
+| `@trade` | Sales/quote/order data |
+| `@customers` | Customer data |
+| `@search` | Search indexes |
+| `@idx` | Index tables |
+
+**n98 Examples:**
+
+```bash
+# Use n98 for dump
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --use-n98 -v' < dump_database.sh | gzip > db_dump/staging.sql.gz
+
+# Strip PII tables (customers, sales, quotes) - structure only, no data
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --strip "@customers @trade" -v' < dump_database.sh | gzip > db_dump/staging_stripped.sql.gz
+
+# Strip for development environment
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --strip "@development @log @sessions" -v' < dump_database.sh | gzip > db_dump/dev_dump.sql.gz
+
+# Anonymize PII data (requires GDPR module)
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --anonymize -v' < dump_database.sh | gzip > db_dump/anon_dump.sql.gz
+
+# Anonymize + strip logs (full dev-safe dump)
+magento-cloud ssh -p PROJECT_ID -e staging -- 'bash -s -- --anonymize --strip "@log @sessions" -v' < dump_database.sh | gzip > db_dump/dev_safe_dump.sql.gz
+```
+
+**Anonymization Requirements:**
+
+The `--anonymize` flag requires a GDPR module installed with n98-magerun2:
+- `netz98/magerun2-password-normalizer`
+- `elgentos/masquerade`
+- `iMi/magerun2-gdpr-dump`
+
+Check available modules: `bin/n98 list | grep -i gdpr`
+
+Notes
+
+- Requires `magento-cloud` CLI installed and authenticated
+- Large databases may take significant time; consider `--strip` or `--structure-only` for big tables
+- By default, ALL data is included. Use `--strip` or `--structure-only` to reduce dump size
+- Use `verify_dump.sh` to validate the dump after completion
+
+### verify_dump.sh
+
+Verifies a database dump file for integrity and completeness. Works on both macOS and Linux with `.sql` and `.sql.gz` files.
+
+Checks performed
+
+- Gzip integrity (for compressed files)
+- File size and metadata
+- CREATE TABLE count
+- INSERT statement count
+- Header and footer presence
+- Dump completion marker
+
+Usage
+
+```bash
+# Basic verification
+./verify_dump.sh db_dump/staging.sql.gz
+
+# With expected table count
+./verify_dump.sh db_dump/staging.sql.gz --expected-tables 668
+
+# Uncompressed file
+./verify_dump.sh db_dump/dump.sql
+```
+
+Output
+
+```
+============================================================
+DATABASE DUMP VERIFICATION
+============================================================
+
+File: db_dump/staging.sql.gz
+Date: 2026-02-05 12:30:45
+
+------------------------------------------------------------
+6. VERIFICATION SUMMARY
+------------------------------------------------------------
+
+   [OK] Header present
+   [OK] Footer present (dump completed)
+   [OK] Table count matches expected (668/668)
+   [OK] Data found: 125432 INSERT statements
+   [OK] File has content (1542.50 MB uncompressed)
+
+============================================================
+RESULT: DUMP LOOKS GOOD
+============================================================
+```
 
 ## Development & QA
 

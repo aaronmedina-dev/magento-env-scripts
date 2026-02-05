@@ -1,0 +1,20 @@
+# Database dumps (keep folder, ignore contents)
+db_dump/*
+!db_dump/.gitkeep
+*.sql
+*.sql.gz
+
+# Temporary files
+*.tmp
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
