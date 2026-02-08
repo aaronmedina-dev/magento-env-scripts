@@ -20,6 +20,14 @@ ACCOUNT_ID=""
 PROJECT_ID=""
 DASHBOARD_PREFIX=""
 
+# Determine where to send interactive output
+# Use /dev/tty if available and working (for SSH piping), otherwise stderr
+if ( exec >/dev/tty ) 2>/dev/null; then
+  INTERACTIVE_OUT="/dev/tty"
+else
+  INTERACTIVE_OUT="/dev/stderr"
+fi
+
 #-------------------------------------------------------------------------------
 # Helper functions
 #-------------------------------------------------------------------------------
@@ -47,11 +55,17 @@ prompt_required() {
   local var_name="$2"
   local value=""
 
+  # Check if we can read from /dev/tty (required for SSH piping scenarios)
+  if ! ( exec >/dev/tty ) 2>/dev/null; then
+    print_error "Cannot read input: /dev/tty not available. Use --non-interactive mode." >"$INTERACTIVE_OUT"
+    exit 1
+  fi
+
   while [[ -z "$value" ]]; do
-    echo -en "${YELLOW}$prompt_text${NC} "
-    read -r value
+    echo -en "${YELLOW}$prompt_text${NC} " >"$INTERACTIVE_OUT"
+    read -r value </dev/tty
     if [[ -z "$value" ]]; then
-      print_error "This field is required. Please enter a value."
+      print_error "This field is required. Please enter a value." >"$INTERACTIVE_OUT"
     fi
   done
 
@@ -64,11 +78,16 @@ prompt_optional() {
   local default_value="$3"
   local value=""
 
-  echo -en "${YELLOW}$prompt_text${NC} [${default_value}]: "
-  read -r value
-
-  if [[ -z "$value" ]]; then
+  # Check if we can read from /dev/tty (required for SSH piping scenarios)
+  if ! ( exec >/dev/tty ) 2>/dev/null; then
+    # Fall back to default value if can't read
     value="$default_value"
+  else
+    echo -en "${YELLOW}$prompt_text${NC} [${default_value}]: " >"$INTERACTIVE_OUT"
+    read -r value </dev/tty
+    if [[ -z "$value" ]]; then
+      value="$default_value"
+    fi
   fi
 
   eval "$var_name=\"$value\""
@@ -145,58 +164,65 @@ done
 # Main script
 #-------------------------------------------------------------------------------
 
-print_header "New Relic OneView Dashboard Generator"
-echo ""
-echo "This script generates New Relic dashboard JSON files for:"
-echo "  - Production environment"
-echo "  - Staging environment"
-echo ""
+# All interactive output goes to /dev/tty to handle stdin redirection
+{
+  print_header "New Relic OneView Dashboard Generator"
+  echo ""
+  echo "This script generates New Relic dashboard JSON files for:"
+  echo "  - Production environment"
+  echo "  - Staging environment"
+  echo ""
+} >"$INTERACTIVE_OUT"
 
 # Step 1: Get New Relic Account ID
 if [[ -z "$ACCOUNT_ID" ]]; then
   if [[ "$NON_INTERACTIVE" == true ]]; then
-    print_error "New Relic Account ID is required. Use --account-id or run interactively."
+    print_error "New Relic Account ID is required. Use --account-id or run interactively." >"$INTERACTIVE_OUT"
     exit 1
   fi
 
-  echo -e "${BLUE}Where to find your Account ID:${NC}"
-  echo "  1. Log in to New Relic"
-  echo "  2. Click your name (bottom-left) > Administration > Access Management"
-  echo "  3. Account ID is shown in the Accounts list"
-  echo "  Or: Look in any existing dashboard JSON export for 'accountIds'"
-  echo ""
+  {
+    echo -e "${BLUE}Where to find your Account ID:${NC}"
+    echo "  1. Log in to New Relic"
+    echo "  2. Click your name (bottom-left) > Administration > Access Management"
+    echo "  3. Account ID is shown in the Accounts list"
+    echo "  Or: Look in any existing dashboard JSON export for 'accountIds'"
+    echo ""
+  } >"$INTERACTIVE_OUT"
 
   prompt_required "Enter your New Relic Account ID:" ACCOUNT_ID
 fi
 
 # Validate Account ID is numeric
 if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
-  print_error "Account ID must be a number. Got: $ACCOUNT_ID"
+  print_error "Account ID must be a number. Got: $ACCOUNT_ID" >"$INTERACTIVE_OUT"
   exit 1
 fi
 
-print_info "Using Account ID: $ACCOUNT_ID"
+print_info "Using Account ID: $ACCOUNT_ID" >"$INTERACTIVE_OUT"
 
 # Step 2: Auto-detect or prompt for Project ID
 if [[ -z "$PROJECT_ID" ]]; then
   # Try to auto-detect from environment
   if [[ -n "${MAGENTO_CLOUD_PROJECT:-}" ]]; then
     PROJECT_ID="$MAGENTO_CLOUD_PROJECT"
-    print_info "Auto-detected Project ID: $PROJECT_ID"
+    print_info "Auto-detected Project ID: $PROJECT_ID" >"$INTERACTIVE_OUT"
   elif [[ "$NON_INTERACTIVE" == true ]]; then
-    print_error "Project ID is required. Use --project-id or run interactively."
+    print_error "Project ID is required. Use --project-id or run interactively." >"$INTERACTIVE_OUT"
     exit 1
   else
-    echo ""
-    echo -e "${BLUE}Project ID not auto-detected.${NC}"
-    echo "You can find it in:"
-    echo "  - magento-cloud project:info"
-    echo "  - Adobe Commerce Cloud Console URL"
-    echo ""
+    {
+      echo ""
+      echo -e "${BLUE}Project ID not auto-detected.${NC}"
+      echo "You can find it in:"
+      echo "  - magento-cloud project:info"
+      echo "  - Adobe Commerce Cloud Console URL"
+      echo ""
+    } >"$INTERACTIVE_OUT"
     prompt_required "Enter your Adobe Commerce Cloud Project ID:" PROJECT_ID
   fi
 else
-  print_info "Using Project ID: $PROJECT_ID"
+  print_info "Using Project ID: $PROJECT_ID" >"$INTERACTIVE_OUT"
 fi
 
 # Step 3: Dashboard name prefix
@@ -204,17 +230,17 @@ if [[ -z "$DASHBOARD_PREFIX" ]]; then
   if [[ "$NON_INTERACTIVE" == true ]]; then
     DASHBOARD_PREFIX="$PROJECT_ID"
   else
-    echo ""
+    echo "" >"$INTERACTIVE_OUT"
     prompt_optional "Enter dashboard name prefix" DASHBOARD_PREFIX "$PROJECT_ID"
   fi
 fi
 
-print_info "Using Dashboard Prefix: $DASHBOARD_PREFIX"
+print_info "Using Dashboard Prefix: $DASHBOARD_PREFIX" >"$INTERACTIVE_OUT"
 
 # Step 4: Create output directory if needed
 if [[ ! -d "$OUTPUT_DIR" ]]; then
   mkdir -p "$OUTPUT_DIR"
-  print_info "Created output directory: $OUTPUT_DIR"
+  print_info "Created output directory: $OUTPUT_DIR" >"$INTERACTIVE_OUT"
 fi
 
 #-------------------------------------------------------------------------------
@@ -1019,12 +1045,14 @@ DASHBOARD_TEMPLATE
   # Remove backup file
   rm -f "${output_file}.bak"
 
-  print_info "Generated: $output_file"
+  print_info "Generated: $output_file" >"$INTERACTIVE_OUT"
 }
 
 # Generate production dashboard
-echo ""
-print_header "Generating Dashboards"
+{
+  echo ""
+  print_header "Generating Dashboards"
+} >"$INTERACTIVE_OUT"
 
 PROD_FILE="${OUTPUT_DIR}/oneview_production.json"
 STG_FILE="${OUTPUT_DIR}/oneview_staging.json"
@@ -1033,21 +1061,23 @@ generate_dashboard "production" "$PROD_FILE"
 generate_dashboard "staging" "$STG_FILE"
 
 # Summary
-echo ""
-print_header "Generation Complete"
-echo ""
-echo -e "${GREEN}Successfully generated 2 dashboard files:${NC}"
-echo ""
-echo "  Production: $PROD_FILE"
-echo "  Staging:    $STG_FILE"
-echo ""
-echo -e "${BLUE}To import into New Relic:${NC}"
-echo "  1. Log in to New Relic"
-echo "  2. Go to Dashboards"
-echo "  3. Click 'Import dashboard' (top right)"
-echo "  4. Paste the contents of the JSON file"
-echo "  5. Click 'Import dashboard'"
-echo ""
-echo -e "${YELLOW}Note:${NC} Some widgets may need adjustment based on your specific"
-echo "environment configuration (mount points, APM app names, etc.)"
-echo ""
+{
+  echo ""
+  print_header "Generation Complete"
+  echo ""
+  echo -e "${GREEN}Successfully generated 2 dashboard files:${NC}"
+  echo ""
+  echo "  Production: $PROD_FILE"
+  echo "  Staging:    $STG_FILE"
+  echo ""
+  echo -e "${BLUE}To import into New Relic:${NC}"
+  echo "  1. Log in to New Relic"
+  echo "  2. Go to Dashboards"
+  echo "  3. Click 'Import dashboard' (top right)"
+  echo "  4. Paste the contents of the JSON file"
+  echo "  5. Click 'Import dashboard'"
+  echo ""
+  echo -e "${YELLOW}Note:${NC} Some widgets may need adjustment based on your specific"
+  echo "environment configuration (mount points, APM app names, etc.)"
+  echo ""
+} >"$INTERACTIVE_OUT"
