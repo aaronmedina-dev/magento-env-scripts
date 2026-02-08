@@ -15,6 +15,7 @@ Utilities to validate, inspect, and compare Adobe Commerce (Magento 2.x) environ
 | [`review_email_sending.sh`](#review_email_sendingsh) | Comprehensive email sending configuration review |
 | [`analyze_mail_logs.sh`](#analyze_mail_logssh) | Parse Postfix mail logs for delivery outcomes |
 | [`magento_health_check.sh`](#magento_health_checksh) | Deep diagnostics over configurable time window |
+| [`generate_oneview_dashboard.sh`](#generate_oneview_dashboardsh) | Generate New Relic OneView dashboard JSON files |
 
 ---
 
@@ -385,6 +386,74 @@ Deep, duration-based diagnostic over a recent time window (default: 72 hours).
 export MAGENTO_DIR=/path/to/magento
 bash magento_health_check.sh
 ```
+
+---
+
+### generate_oneview_dashboard.sh
+
+Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud. Creates separate dashboards for Production and Staging environments based on Adobe Commerce support's OneView template.
+
+**Features:**
+
+- Interactive prompts with auto-detection of Project ID
+- Generates production and staging dashboards
+- 50+ pre-configured widgets covering infrastructure, CDN, transactions, errors
+- Can run from any environment (generates both dashboards from single SSH session)
+
+**What the dashboard includes:**
+
+| Section | Widgets |
+|---------|---------|
+| Server Health | CPU, Memory, Load Average, Throughput |
+| New Relic Alerts | Open alerts count and details |
+| Disk Usage | Shared/Media and MySQL disk usage with trends |
+| Fastly CDN | Bandwidth, content types, bot detection, large images |
+| Web Requests | Cache analysis (FPC, GraphQL), HTTP status, 404s |
+| Transactions | Web and non-web transaction performance |
+| Errors | Top errors and exceptions |
+| Traffic | DDoS detection, client IP analysis |
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--account-id ID` | New Relic Account ID (required) |
+| `--project-id ID` | Adobe Commerce Cloud Project ID (auto-detected) |
+| `--prefix NAME` | Dashboard name prefix (default: project ID) |
+| `--output-dir DIR` | Output directory (default: current) |
+| `--non-interactive` | Skip prompts, fail if required values missing |
+
+**Usage:**
+
+```bash
+# Interactive mode (recommended) - run on any environment
+magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s' < generate_oneview_dashboard.sh
+
+# Non-interactive with all parameters
+./generate_oneview_dashboard.sh --account-id 1234567 --project-id abc123xyz --prefix "MyStore"
+
+# Run locally if you know your project ID
+./generate_oneview_dashboard.sh
+```
+
+**Output:**
+
+Two JSON files ready to import into New Relic:
+- `oneview_production.json`
+- `oneview_staging.json`
+
+**How to import:**
+
+1. Log in to New Relic
+2. Go to Dashboards
+3. Click "Import dashboard" (top right)
+4. Paste the contents of the JSON file
+5. Click "Import dashboard"
+
+**Finding your New Relic Account ID:**
+
+- New Relic UI: User menu > Administration > Access Management > Accounts
+- Or look in any existing dashboard JSON export for `accountIds`
 
 ---
 
