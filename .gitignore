@@ -4,6 +4,9 @@ db_dump/*
 *.sql
 *.sql.gz
 
+# Generated New Relic dashboard files
+oneview_*.json
+
 # Temporary files
 *.tmp
 /tmp/

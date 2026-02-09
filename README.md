@@ -411,6 +411,12 @@ Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud. Creat
 | Transactions | Web and non-web transaction performance |
 | Errors | Top errors and exceptions |
 | Traffic | DDoS detection, client IP analysis |
+| Database | Query time, slow queries, DB call counts, high-DB transactions |
+| Redis/Valkey | Operation time, call rate, throughput by operation |
+| Elasticsearch | Query time, call rate, latency distribution |
+| PHP-FPM | Memory usage, CPU, process count, duration distribution |
+| Cron & Queues | Job duration, throughput, top cron jobs, message consumers |
+| Application | Apdex score, response percentiles, error rate, external services |
 
 **Flags:**
 

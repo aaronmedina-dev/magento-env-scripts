@@ -189,17 +189,20 @@ generate_dashboard() {
   local env_display=""
   local env_tag=""
   local apm_filter=""
+  local app_filter=""
   local project_filter=""
 
   if [[ "$env_type" == "production" ]]; then
     env_display="Production"
     env_tag="production"
     apm_filter="apmApplicationNames NOT LIKE '%_stg%'"
+    app_filter="appName NOT LIKE '%_stg%'"
     project_filter="project_id NOT LIKE '%_stg%'"
   else
     env_display="Staging"
     env_tag="staging"
     apm_filter="apmApplicationNames LIKE '%_stg%'"
+    app_filter="appName LIKE '%_stg%'"
     project_filter="project_id LIKE '%_stg%'"
   fi
 
@@ -324,7 +327,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "SELECT rate(count(apm.service.transaction.duration), 1 minute) as 'Web throughput' FROM Metric WHERE (appName NOT LIKE '%_stg%' and appName NOT LIKE '%mymagento%') AND (transactionType = 'Web') SINCE 1 week AGO TIMESERIES max"
+                "query": "SELECT rate(count(apm.service.transaction.duration), 1 minute) as 'Web throughput' FROM Metric WHERE (__APP_FILTER__ and appName NOT LIKE '%mymagento%') AND (transactionType = 'Web') SINCE 1 week AGO TIMESERIES max"
               }
             ],
             "platformOptions": { "ignoreTimeRange": false },
@@ -343,7 +346,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "SELECT average(apm.service.overview.web) * 1000 FROM Metric WHERE (appName NOT LIKE '%_stg%') FACET `segmentName` SINCE 604800 seconds AGO TIMESERIES"
+                "query": "SELECT average(apm.service.overview.web) * 1000 FROM Metric WHERE (__APP_FILTER__) FACET `segmentName` SINCE 604800 seconds AGO TIMESERIES"
               }
             ],
             "platformOptions": { "ignoreTimeRange": false }
@@ -750,7 +753,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "FROM Transaction SELECT average(duration) as `Average Time (s)` FACET name WHERE transactionType = 'Web' AND appName not like '%_stg%' and (name like '%catalog/category/view%' or name like '%catalog/product/view%' or name like '%catalogsearch/result/index%' or name like '%cms/index/index%') and name not like '%REST%' LIMIT 50"
+                "query": "FROM Transaction SELECT average(duration) as `Average Time (s)` FACET name WHERE transactionType = 'Web' AND __APP_FILTER__ and (name like '%catalog/category/view%' or name like '%catalog/product/view%' or name like '%catalogsearch/result/index%' or name like '%cms/index/index%') and name not like '%REST%' LIMIT 50"
               }
             ],
             "platformOptions": { "ignoreTimeRange": false }
@@ -766,7 +769,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "SELECT name, `Total (s)`, `Count`, `Average (s)`, `Median (s)`, `Min (s)`, `Max (s)`, timestamp FROM (FROM Transaction SELECT count(duration) as `Count`, sum(duration) as `Total (s)`, average(duration) as `Average (s)`, percentile(duration, 50) as `Median (s)`, min(duration) as `Min (s)`, max(duration) as `Max (s)` WHERE transactionType = 'Web' AND appName not like '%_stg%' FACET name, request_uri LIMIT 50) Order by 'Total (s)' desc since 7 days ago limit 20"
+                "query": "SELECT name, `Total (s)`, `Count`, `Average (s)`, `Median (s)`, `Min (s)`, `Max (s)`, timestamp FROM (FROM Transaction SELECT count(duration) as `Count`, sum(duration) as `Total (s)`, average(duration) as `Average (s)`, percentile(duration, 50) as `Median (s)`, min(duration) as `Min (s)`, max(duration) as `Max (s)` WHERE transactionType = 'Web' AND __APP_FILTER__ FACET name, request_uri LIMIT 50) Order by 'Total (s)' desc since 7 days ago limit 20"
               }
             ]
           }
@@ -781,7 +784,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "SELECT name, `Total (s)`, `Count`, `Average (s)`, `Median (s)`, `Min (s)`, `Max (s)`, timestamp FROM (FROM Transaction SELECT count(duration) as `Count`, sum(duration) as `Total (s)`, average(duration) as `Average (s)`, percentile(duration, 50) as `Median (s)`, min(duration) as `Min (s)`, max(duration) as `Max (s)` WHERE transactionType = 'Other' AND appName not like '%_stg%' FACET name, request_uri LIMIT 50) Order by 'Total (s)' desc since 7 days ago limit 20"
+                "query": "SELECT name, `Total (s)`, `Count`, `Average (s)`, `Median (s)`, `Min (s)`, `Max (s)`, timestamp FROM (FROM Transaction SELECT count(duration) as `Count`, sum(duration) as `Total (s)`, average(duration) as `Average (s)`, percentile(duration, 50) as `Median (s)`, min(duration) as `Min (s)`, max(duration) as `Max (s)` WHERE transactionType = 'Other' AND __APP_FILTER__ FACET name, request_uri LIMIT 50) Order by 'Total (s)' desc since 7 days ago limit 20"
               }
             ]
           }
@@ -805,7 +808,7 @@ generate_dashboard() {
             "nrqlQueries": [
               {
                 "accountIds": [__ACCOUNT_ID__],
-                "query": "SELECT count(*) as counter FROM TransactionError WHERE (appName NOT LIKE '%_stg%') AND (`error.expected` IS FALSE OR `error.expected` IS NULL) FACET `error.class`, `error.message`, `transactionUiName` LIMIT 10 SINCE 30 days ago"
+                "query": "SELECT count(*) as counter FROM TransactionError WHERE (__APP_FILTER__) AND (`error.expected` IS FALSE OR `error.expected` IS NULL) FACET `error.class`, `error.message`, `transactionUiName` LIMIT 10 SINCE 30 days ago"
               }
             ]
           }
@@ -955,6 +958,666 @@ generate_dashboard() {
             ],
             "platformOptions": { "ignoreTimeRange": false }
           }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 57, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "Database Performance\n---\n# MySQL/MariaDB Metrics"
+          }
+        },
+        {
+          "title": "Database Query Time (ms)",
+          "layout": { "column": 1, "row": 58, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'Query Time (ms)' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'MySQL' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Slow Queries (>1s)",
+          "layout": { "column": 5, "row": 58, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT count(*) as 'Slow Queries' FROM Transaction WHERE __APP_FILTER__ AND databaseDuration > 1 TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top Database Operations by Time",
+          "layout": { "column": 9, "row": 58, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'Avg (ms)', count(*) as 'Count' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'MySQL' FACET operation, table LIMIT 20 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Database Call Count",
+          "layout": { "column": 1, "row": 61, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(apm.service.datastore.operation.duration), 1 minute) as 'Calls/min' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'MySQL' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Database Time % of Transaction",
+          "layout": { "column": 5, "row": 61, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(databaseDuration/duration) * 100 as 'DB Time %' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Transactions with High DB Time",
+          "layout": { "column": 9, "row": 61, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(databaseDuration) * 1000 as 'Avg DB Time (ms)', average(databaseCallCount) as 'Avg Calls', count(*) as 'Count' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' FACET name LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 64, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "Redis/Valkey Cache\n---\n# Cache Performance Metrics"
+          }
+        },
+        {
+          "title": "Redis Operation Time (ms)",
+          "layout": { "column": 1, "row": 65, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'Redis Time (ms)' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'Redis' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Redis Call Rate",
+          "layout": { "column": 5, "row": 65, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(apm.service.datastore.operation.duration), 1 minute) as 'Calls/min' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'Redis' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top Redis Operations",
+          "layout": { "column": 9, "row": 65, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'Avg (ms)', count(*) as 'Count' FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'Redis' FACET operation LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Redis Time % of Transaction",
+          "layout": { "column": 1, "row": 68, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(totalTime) * 1000 as 'Total Redis Time (ms)' FROM Metric WHERE __APP_FILTER__ AND metricTimesliceName LIKE '%Redis%' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Redis Throughput by Operation Type",
+          "layout": { "column": 7, "row": 68, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.area" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": true },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(apm.service.datastore.operation.duration), 1 minute) FROM Metric WHERE __APP_FILTER__ AND datastoreType = 'Redis' FACET operation TIMESERIES SINCE 7 days ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 71, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "Elasticsearch/OpenSearch\n---\n# Search Engine Performance"
+          }
+        },
+        {
+          "title": "Elasticsearch Query Time (ms)",
+          "layout": { "column": 1, "row": 72, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'ES Time (ms)' FROM Metric WHERE __APP_FILTER__ AND (datastoreType = 'Elasticsearch' OR datastoreType = 'OpenSearch') TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Elasticsearch Call Rate",
+          "layout": { "column": 5, "row": 72, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(apm.service.datastore.operation.duration), 1 minute) as 'Calls/min' FROM Metric WHERE __APP_FILTER__ AND (datastoreType = 'Elasticsearch' OR datastoreType = 'OpenSearch') TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top Elasticsearch Operations",
+          "layout": { "column": 9, "row": 72, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.datastore.operation.duration) * 1000 as 'Avg (ms)', count(*) as 'Count' FROM Metric WHERE __APP_FILTER__ AND (datastoreType = 'Elasticsearch' OR datastoreType = 'OpenSearch') FACET operation LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Search Latency Distribution",
+          "layout": { "column": 1, "row": 75, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.histogram" },
+          "rawConfiguration": {
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT histogram(apm.service.datastore.operation.duration * 1000, 50, 10) FROM Metric WHERE __APP_FILTER__ AND (datastoreType = 'Elasticsearch' OR datastoreType = 'OpenSearch') SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Elasticsearch Throughput by Operation",
+          "layout": { "column": 7, "row": 75, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.area" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": true },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(apm.service.datastore.operation.duration), 1 minute) FROM Metric WHERE __APP_FILTER__ AND (datastoreType = 'Elasticsearch' OR datastoreType = 'OpenSearch') FACET operation TIMESERIES SINCE 7 days ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 78, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "PHP-FPM\n---\n# PHP Process and Performance Metrics"
+          }
+        },
+        {
+          "title": "PHP Memory Usage by Process",
+          "layout": { "column": 1, "row": 79, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(memoryResidentSizeBytes)/1024/1024 as 'Memory (MB)' FROM ProcessSample WHERE processDisplayName LIKE 'php%' AND __APM_FILTER__ AND apmApplicationNames IS NOT NULL TIMESERIES FACET hostname SINCE 7 days ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "PHP CPU Usage",
+          "layout": { "column": 5, "row": 79, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(cpuPercent) as 'CPU %' FROM ProcessSample WHERE processDisplayName LIKE 'php%' AND __APM_FILTER__ AND apmApplicationNames IS NOT NULL TIMESERIES FACET hostname SINCE 7 days ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "PHP Process Count",
+          "layout": { "column": 9, "row": 79, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT uniqueCount(processId) as 'PHP Processes' FROM ProcessSample WHERE processDisplayName LIKE 'php%' AND __APM_FILTER__ AND apmApplicationNames IS NOT NULL TIMESERIES FACET hostname SINCE 7 days ago LIMIT 10"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "PHP Transaction Duration Distribution",
+          "layout": { "column": 1, "row": 82, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.histogram" },
+          "rawConfiguration": {
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT histogram(duration, 60, 20) FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Long Running Requests (>5s)",
+          "layout": { "column": 7, "row": 82, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT count(*) as 'Count', average(duration) as 'Avg Duration (s)', max(duration) as 'Max (s)' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' AND duration > 5 FACET name LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 85, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "Cron & Message Queues\n---\n# Background Job Performance"
+          }
+        },
+        {
+          "title": "Cron Job Duration",
+          "layout": { "column": 1, "row": 86, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(duration) as 'Duration (s)' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%cron%' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Cron Job Throughput",
+          "layout": { "column": 5, "row": 86, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(*), 1 hour) as 'Jobs/hour' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%cron%' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top Cron Jobs by Duration",
+          "layout": { "column": 9, "row": 86, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(duration) as 'Avg (s)', max(duration) as 'Max (s)', count(*) as 'Count' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%cron%' FACET name LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Message Consumer Duration",
+          "layout": { "column": 1, "row": 89, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(duration) as 'Duration (s)' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%consumer%' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Message Consumer Throughput",
+          "layout": { "column": 5, "row": 89, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT rate(count(*), 1 minute) as 'Messages/min' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%consumer%' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top Message Consumers",
+          "layout": { "column": 9, "row": 89, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(duration) as 'Avg (s)', count(*) as 'Count', sum(duration) as 'Total Time (s)' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Other' AND name LIKE '%consumer%' FACET name LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "",
+          "layout": { "column": 1, "row": 92, "width": 12, "height": 1 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.markdown" },
+          "rawConfiguration": {
+            "text": "Application Performance\n---\n# Apdex, Response Times & External Services"
+          }
+        },
+        {
+          "title": "Apdex Score",
+          "layout": { "column": 1, "row": 93, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT apdex(duration, t: 0.5) as 'Apdex' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": false }
+          }
+        },
+        {
+          "title": "Response Time Percentiles",
+          "layout": { "column": 5, "row": 93, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT percentile(duration, 50, 90, 95, 99) FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Error Rate",
+          "layout": { "column": 9, "row": 93, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT percentage(count(*), WHERE error IS true) as 'Error Rate %' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "External Service Call Time",
+          "layout": { "column": 1, "row": 96, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(externalDuration) * 1000 as 'External Time (ms)' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' AND externalDuration > 0 TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "External Service Calls",
+          "layout": { "column": 5, "row": 96, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.line" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(externalCallCount) as 'External Calls' FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false },
+            "yAxisLeft": { "zero": true }
+          }
+        },
+        {
+          "title": "Top External Services by Time",
+          "layout": { "column": 9, "row": 96, "width": 4, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.table" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.external.host.duration) * 1000 as 'Avg (ms)', count(*) as 'Count' FROM Metric WHERE __APP_FILTER__ FACET external.host LIMIT 15 SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Time Breakdown by Category",
+          "layout": { "column": 1, "row": 99, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.area" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": false },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT average(apm.service.overview.web) * 1000 FROM Metric WHERE __APP_FILTER__ FACET segmentName TIMESERIES SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
+        },
+        {
+          "title": "Transactions by Response Time Bucket",
+          "layout": { "column": 7, "row": 99, "width": 6, "height": 3 },
+          "linkedEntityGuids": null,
+          "visualization": { "id": "viz.pie" },
+          "rawConfiguration": {
+            "facet": { "showOtherSeries": true },
+            "legend": { "enabled": true },
+            "nrqlQueries": [
+              {
+                "accountIds": [__ACCOUNT_ID__],
+                "query": "SELECT count(*) FROM Transaction WHERE __APP_FILTER__ AND transactionType = 'Web' FACET cases(WHERE duration < 0.5 as 'Fast (<0.5s)', WHERE duration >= 0.5 AND duration < 2 as 'Normal (0.5-2s)', WHERE duration >= 2 AND duration < 5 as 'Slow (2-5s)', WHERE duration >= 5 as 'Very Slow (>5s)') SINCE 7 days ago"
+              }
+            ],
+            "platformOptions": { "ignoreTimeRange": false }
+          }
         }
       ]
     }
@@ -971,6 +1634,7 @@ DASHBOARD_TEMPLATE
     -e "s|__ENV_DISPLAY__|${env_display}|g" \
     -e "s|__ENV_TAG__|${env_tag}|g" \
     -e "s|__APM_FILTER__|${apm_filter}|g" \
+    -e "s|__APP_FILTER__|${app_filter}|g" \
     -e "s|__PROJECT_FILTER__|${project_filter}|g" \
     "$output_file"
 
