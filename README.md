@@ -395,10 +395,9 @@ Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud. Creat
 
 **Features:**
 
-- Interactive prompts with auto-detection of Project ID
-- Generates production and staging dashboards
+- Auto-detects Project ID on Adobe Commerce Cloud environments
+- Outputs JSON to stdout for easy local file saving
 - 50+ pre-configured widgets covering infrastructure, CDN, transactions, errors
-- Can run from any environment (generates both dashboards from single SSH session)
 
 **What the dashboard includes:**
 
@@ -418,31 +417,25 @@ Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud. Creat
 | Flag | Description |
 |------|-------------|
 | `--account-id ID` | New Relic Account ID (required) |
-| `--project-id ID` | Adobe Commerce Cloud Project ID (auto-detected) |
+| `--project-id ID` | Adobe Commerce Cloud Project ID (auto-detected on cloud) |
+| `--env ENV` | Generate single dashboard (`production` or `staging`) to stdout |
 | `--prefix NAME` | Dashboard name prefix (default: project ID) |
-| `--output-dir DIR` | Output directory (default: current) |
-| `--non-interactive` | Skip prompts, fail if required values missing |
+| `--output-dir DIR` | Output directory when not using `--env` (default: /tmp on cloud) |
 
 **Usage:**
 
 ```bash
-# Interactive mode (recommended) - run on any environment
-magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s' < generate_oneview_dashboard.sh
+# Generate production dashboard and save locally (recommended)
+magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < generate_oneview_dashboard.sh > oneview_production.json
 
-# Non-interactive with all parameters
-./generate_oneview_dashboard.sh --account-id 1234567 --project-id abc123xyz --prefix "MyStore"
+# Generate staging dashboard and save locally
+magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < generate_oneview_dashboard.sh > oneview_staging.json
 
-# Run locally if you know your project ID
-./generate_oneview_dashboard.sh
+# Run locally with all parameters (generates both to files)
+./generate_oneview_dashboard.sh --account-id 1234567 --project-id abc123xyz
 ```
 
-**Output:**
-
-Two JSON files ready to import into New Relic:
-- `oneview_production.json`
-- `oneview_staging.json`
-
-**How to import:**
+**How to import into New Relic:**
 
 1. Log in to New Relic
 2. Go to Dashboards

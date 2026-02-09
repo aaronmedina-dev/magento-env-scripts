@@ -7,7 +7,7 @@ set -Eeuo pipefail
 # Creates separate dashboards for Production and Staging environments
 #===============================================================================
 
-# Colors for output
+# Colors for output (sent to stderr so JSON can be piped)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,116 +15,68 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default values
-OUTPUT_DIR="."
+OUTPUT_DIR=""  # Will be set based on environment
 ACCOUNT_ID=""
 PROJECT_ID=""
 DASHBOARD_PREFIX=""
-
-# Determine where to send interactive output
-# Use /dev/tty if available and working (for SSH piping), otherwise stderr
-if ( exec >/dev/tty ) 2>/dev/null; then
-  INTERACTIVE_OUT="/dev/tty"
-else
-  INTERACTIVE_OUT="/dev/stderr"
-fi
+TARGET_ENV=""  # If set, output single dashboard to stdout
 
 #-------------------------------------------------------------------------------
 # Helper functions
 #-------------------------------------------------------------------------------
 
 print_header() {
-  echo -e "${BLUE}============================================================${NC}"
-  echo -e "${BLUE}$1${NC}"
-  echo -e "${BLUE}============================================================${NC}"
+  echo -e "${BLUE}============================================================${NC}" >&2
+  echo -e "${BLUE}$1${NC}" >&2
+  echo -e "${BLUE}============================================================${NC}" >&2
 }
 
 print_info() {
-  echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-print_warn() {
-  echo -e "${YELLOW}[WARN]${NC} $1"
+  echo -e "${GREEN}[INFO]${NC} $1" >&2
 }
 
 print_error() {
-  echo -e "${RED}[ERROR]${NC} $1"
-}
-
-prompt_required() {
-  local prompt_text="$1"
-  local var_name="$2"
-  local value=""
-
-  # Check if we can read from /dev/tty (required for SSH piping scenarios)
-  if ! ( exec >/dev/tty ) 2>/dev/null; then
-    print_error "Cannot read input: /dev/tty not available. Use --non-interactive mode." >"$INTERACTIVE_OUT"
-    exit 1
-  fi
-
-  while [[ -z "$value" ]]; do
-    echo -en "${YELLOW}$prompt_text${NC} " >"$INTERACTIVE_OUT"
-    read -r value </dev/tty
-    if [[ -z "$value" ]]; then
-      print_error "This field is required. Please enter a value." >"$INTERACTIVE_OUT"
-    fi
-  done
-
-  eval "$var_name=\"$value\""
-}
-
-prompt_optional() {
-  local prompt_text="$1"
-  local var_name="$2"
-  local default_value="$3"
-  local value=""
-
-  # Check if we can read from /dev/tty (required for SSH piping scenarios)
-  if ! ( exec >/dev/tty ) 2>/dev/null; then
-    # Fall back to default value if can't read
-    value="$default_value"
-  else
-    echo -en "${YELLOW}$prompt_text${NC} [${default_value}]: " >"$INTERACTIVE_OUT"
-    read -r value </dev/tty
-    if [[ -z "$value" ]]; then
-      value="$default_value"
-    fi
-  fi
-
-  eval "$var_name=\"$value\""
+  echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 show_usage() {
-  cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
+  cat >&2 <<EOF
+Usage: $(basename "$0") --account-id ID [OPTIONS]
 
 Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud.
 Creates separate dashboards for Production and Staging environments.
 
+Required:
+  --account-id ID       New Relic Account ID (find in New Relic > Administration > Access Management)
+
 Options:
-  --account-id ID       New Relic Account ID (required if not prompted)
-  --project-id ID       Adobe Commerce Cloud Project ID (auto-detected if available)
+  --project-id ID       Adobe Commerce Cloud Project ID (auto-detected on cloud environments)
   --prefix NAME         Dashboard name prefix (default: project ID)
-  --output-dir DIR      Output directory for JSON files (default: current directory)
-  --non-interactive     Skip prompts, fail if required values missing
+  --env ENV             Generate single dashboard (production|staging) and output JSON to stdout
+  --output-dir DIR      Output directory for JSON files (default: /tmp on cloud, . locally)
   -h, --help            Show this help message
 
 Examples:
-  # Interactive mode (recommended)
-  $(basename "$0")
+  # Generate production dashboard and save locally (recommended for remote execution)
+  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < $(basename "$0") > oneview_production.json
 
-  # Non-interactive with all parameters
-  $(basename "$0") --account-id 1234567 --project-id abc123xyz --prefix "MyStore"
+  # Generate staging dashboard and save locally
+  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < $(basename "$0") > oneview_staging.json
 
-  # Run remotely via SSH
-  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s' < $(basename "$0")
+  # Generate both dashboards to files (local execution)
+  $(basename "$0") --account-id 1234567 --project-id abc123xyz
+
+Finding your New Relic Account ID:
+  1. Log in to New Relic
+  2. Click your name (bottom-left) > Administration > Access Management
+  3. Account ID is shown in the Accounts list
+  Or: Look in any existing dashboard JSON export for 'accountIds'
 EOF
 }
 
 #-------------------------------------------------------------------------------
 # Parse command line arguments
 #-------------------------------------------------------------------------------
-
-NON_INTERACTIVE=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -140,13 +92,17 @@ while [[ $# -gt 0 ]]; do
       DASHBOARD_PREFIX="$2"
       shift 2
       ;;
+    --env)
+      TARGET_ENV="$2"
+      if [[ "$TARGET_ENV" != "production" && "$TARGET_ENV" != "staging" ]]; then
+        print_error "--env must be 'production' or 'staging'"
+        exit 1
+      fi
+      shift 2
+      ;;
     --output-dir)
       OUTPUT_DIR="$2"
       shift 2
-      ;;
-    --non-interactive)
-      NON_INTERACTIVE=true
-      shift
       ;;
     -h|--help)
       show_usage
@@ -164,83 +120,61 @@ done
 # Main script
 #-------------------------------------------------------------------------------
 
-# All interactive output goes to /dev/tty to handle stdin redirection
-{
-  print_header "New Relic OneView Dashboard Generator"
-  echo ""
-  echo "This script generates New Relic dashboard JSON files for:"
-  echo "  - Production environment"
-  echo "  - Staging environment"
-  echo ""
-} >"$INTERACTIVE_OUT"
+print_header "New Relic OneView Dashboard Generator"
+echo "" >&2
+echo "This script generates New Relic dashboard JSON files for:" >&2
+echo "  - Production environment" >&2
+echo "  - Staging environment" >&2
+echo "" >&2
 
-# Step 1: Get New Relic Account ID
+# Step 1: Validate Account ID (required)
 if [[ -z "$ACCOUNT_ID" ]]; then
-  if [[ "$NON_INTERACTIVE" == true ]]; then
-    print_error "New Relic Account ID is required. Use --account-id or run interactively." >"$INTERACTIVE_OUT"
-    exit 1
-  fi
-
-  {
-    echo -e "${BLUE}Where to find your Account ID:${NC}"
-    echo "  1. Log in to New Relic"
-    echo "  2. Click your name (bottom-left) > Administration > Access Management"
-    echo "  3. Account ID is shown in the Accounts list"
-    echo "  Or: Look in any existing dashboard JSON export for 'accountIds'"
-    echo ""
-  } >"$INTERACTIVE_OUT"
-
-  prompt_required "Enter your New Relic Account ID:" ACCOUNT_ID
-fi
-
-# Validate Account ID is numeric
-if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
-  print_error "Account ID must be a number. Got: $ACCOUNT_ID" >"$INTERACTIVE_OUT"
+  print_error "New Relic Account ID is required. Use --account-id ID"
+  echo "" >&2
+  show_usage
   exit 1
 fi
 
-print_info "Using Account ID: $ACCOUNT_ID" >"$INTERACTIVE_OUT"
+if ! [[ "$ACCOUNT_ID" =~ ^[0-9]+$ ]]; then
+  print_error "Account ID must be a number. Got: $ACCOUNT_ID"
+  exit 1
+fi
 
-# Step 2: Auto-detect or prompt for Project ID
+print_info "Using Account ID: $ACCOUNT_ID"
+
+# Step 2: Get Project ID (auto-detect or from argument)
 if [[ -z "$PROJECT_ID" ]]; then
-  # Try to auto-detect from environment
   if [[ -n "${MAGENTO_CLOUD_PROJECT:-}" ]]; then
     PROJECT_ID="$MAGENTO_CLOUD_PROJECT"
-    print_info "Auto-detected Project ID: $PROJECT_ID" >"$INTERACTIVE_OUT"
-  elif [[ "$NON_INTERACTIVE" == true ]]; then
-    print_error "Project ID is required. Use --project-id or run interactively." >"$INTERACTIVE_OUT"
-    exit 1
+    print_info "Auto-detected Project ID: $PROJECT_ID"
   else
-    {
-      echo ""
-      echo -e "${BLUE}Project ID not auto-detected.${NC}"
-      echo "You can find it in:"
-      echo "  - magento-cloud project:info"
-      echo "  - Adobe Commerce Cloud Console URL"
-      echo ""
-    } >"$INTERACTIVE_OUT"
-    prompt_required "Enter your Adobe Commerce Cloud Project ID:" PROJECT_ID
+    print_error "Project ID is required. Use --project-id ID or run on Adobe Commerce Cloud environment."
+    exit 1
   fi
 else
-  print_info "Using Project ID: $PROJECT_ID" >"$INTERACTIVE_OUT"
+  print_info "Using Project ID: $PROJECT_ID"
 fi
 
-# Step 3: Dashboard name prefix
+# Step 3: Dashboard name prefix (defaults to project ID)
 if [[ -z "$DASHBOARD_PREFIX" ]]; then
-  if [[ "$NON_INTERACTIVE" == true ]]; then
-    DASHBOARD_PREFIX="$PROJECT_ID"
+  DASHBOARD_PREFIX="$PROJECT_ID"
+fi
+
+print_info "Using Dashboard Prefix: $DASHBOARD_PREFIX"
+
+# Step 4: Set output directory (default to /tmp on cloud, current dir locally)
+if [[ -z "$OUTPUT_DIR" ]]; then
+  if [[ -n "${MAGENTO_CLOUD_PROJECT:-}" ]]; then
+    OUTPUT_DIR="/tmp"
+    print_info "Using output directory: $OUTPUT_DIR (cloud environment)"
   else
-    echo "" >"$INTERACTIVE_OUT"
-    prompt_optional "Enter dashboard name prefix" DASHBOARD_PREFIX "$PROJECT_ID"
+    OUTPUT_DIR="."
   fi
 fi
 
-print_info "Using Dashboard Prefix: $DASHBOARD_PREFIX" >"$INTERACTIVE_OUT"
-
-# Step 4: Create output directory if needed
 if [[ ! -d "$OUTPUT_DIR" ]]; then
   mkdir -p "$OUTPUT_DIR"
-  print_info "Created output directory: $OUTPUT_DIR" >"$INTERACTIVE_OUT"
+  print_info "Created output directory: $OUTPUT_DIR"
 fi
 
 #-------------------------------------------------------------------------------
@@ -260,13 +194,11 @@ generate_dashboard() {
   if [[ "$env_type" == "production" ]]; then
     env_display="Production"
     env_tag="production"
-    # Production: exclude staging
     apm_filter="apmApplicationNames NOT LIKE '%_stg%'"
     project_filter="project_id NOT LIKE '%_stg%'"
   else
     env_display="Staging"
     env_tag="staging"
-    # Staging: include only staging
     apm_filter="apmApplicationNames LIKE '%_stg%'"
     project_filter="project_id LIKE '%_stg%'"
   fi
@@ -1045,39 +977,61 @@ DASHBOARD_TEMPLATE
   # Remove backup file
   rm -f "${output_file}.bak"
 
-  print_info "Generated: $output_file" >"$INTERACTIVE_OUT"
+  # Only show message if not in single-env mode (temp file)
+  if [[ -z "$TARGET_ENV" ]]; then
+    print_info "Generated: $output_file"
+  fi
 }
 
-# Generate production dashboard
-{
-  echo ""
+# Generate dashboards
+if [[ -n "$TARGET_ENV" ]]; then
+  # Single dashboard mode - output JSON to stdout
+  print_info "Generating ${TARGET_ENV} dashboard to stdout..." >&2
+
+  # Create temp file, generate, output to stdout, cleanup
+  TEMP_FILE=$(mktemp)
+  generate_dashboard "$TARGET_ENV" "$TEMP_FILE"
+  cat "$TEMP_FILE"
+  rm -f "$TEMP_FILE"
+
+  print_info "Done. Redirect output to save: > oneview_${TARGET_ENV}.json" >&2
+else
+  # Dual dashboard mode - write to files
+  echo "" >&2
   print_header "Generating Dashboards"
-} >"$INTERACTIVE_OUT"
 
-PROD_FILE="${OUTPUT_DIR}/oneview_production.json"
-STG_FILE="${OUTPUT_DIR}/oneview_staging.json"
+  PROD_FILE="${OUTPUT_DIR}/oneview_production.json"
+  STG_FILE="${OUTPUT_DIR}/oneview_staging.json"
 
-generate_dashboard "production" "$PROD_FILE"
-generate_dashboard "staging" "$STG_FILE"
+  generate_dashboard "production" "$PROD_FILE"
+  generate_dashboard "staging" "$STG_FILE"
 
-# Summary
-{
-  echo ""
+  # Summary
+  echo "" >&2
   print_header "Generation Complete"
-  echo ""
-  echo -e "${GREEN}Successfully generated 2 dashboard files:${NC}"
-  echo ""
-  echo "  Production: $PROD_FILE"
-  echo "  Staging:    $STG_FILE"
-  echo ""
-  echo -e "${BLUE}To import into New Relic:${NC}"
-  echo "  1. Log in to New Relic"
-  echo "  2. Go to Dashboards"
-  echo "  3. Click 'Import dashboard' (top right)"
-  echo "  4. Paste the contents of the JSON file"
-  echo "  5. Click 'Import dashboard'"
-  echo ""
-  echo -e "${YELLOW}Note:${NC} Some widgets may need adjustment based on your specific"
-  echo "environment configuration (mount points, APM app names, etc.)"
-  echo ""
-} >"$INTERACTIVE_OUT"
+  echo "" >&2
+  echo -e "${GREEN}Successfully generated 2 dashboard files:${NC}" >&2
+  echo "" >&2
+  echo "  Production: $PROD_FILE" >&2
+  echo "  Staging:    $STG_FILE" >&2
+  echo "" >&2
+
+  # Show download instructions if on cloud
+  if [[ -n "${MAGENTO_CLOUD_PROJECT:-}" ]]; then
+    echo -e "${BLUE}To download files from cloud:${NC}" >&2
+    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $PROD_FILE' > oneview_production.json" >&2
+    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $STG_FILE' > oneview_staging.json" >&2
+    echo "" >&2
+  fi
+
+  echo -e "${BLUE}To import into New Relic:${NC}" >&2
+  echo "  1. Log in to New Relic" >&2
+  echo "  2. Go to Dashboards" >&2
+  echo "  3. Click 'Import dashboard' (top right)" >&2
+  echo "  4. Paste the contents of the JSON file" >&2
+  echo "  5. Click 'Import dashboard'" >&2
+  echo "" >&2
+  echo -e "${YELLOW}Note:${NC} Some widgets may need adjustment based on your specific" >&2
+  echo "environment configuration (mount points, APM app names, etc.)" >&2
+  echo "" >&2
+fi
