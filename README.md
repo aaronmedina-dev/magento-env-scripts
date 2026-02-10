@@ -431,13 +431,13 @@ Generates New Relic OneView dashboard JSON files for Adobe Commerce Cloud. Creat
 **Usage:**
 
 ```bash
-# Generate production dashboard and save locally (recommended)
-magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < generate_oneview_dashboard.sh > oneview_production.json
+# Generate production dashboard via SSH (auto-detects project ID)
+magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < generate_oneview_dashboard.sh > oneview_PROJECT_ID_production.json
 
-# Generate staging dashboard and save locally
-magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < generate_oneview_dashboard.sh > oneview_staging.json
+# Generate staging dashboard via SSH (auto-detects project ID)
+magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < generate_oneview_dashboard.sh > oneview_PROJECT_ID_staging.json
 
-# Run locally with all parameters (generates both to files)
+# Generate both dashboards locally (outputs oneview_<project-id>_production.json and oneview_<project-id>_staging.json)
 ./generate_oneview_dashboard.sh --account-id 1234567 --project-id abc123xyz
 ```
 

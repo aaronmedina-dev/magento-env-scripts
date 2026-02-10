@@ -57,13 +57,13 @@ Options:
   -h, --help            Show this help message
 
 Examples:
-  # Generate production dashboard and save locally (recommended for remote execution)
-  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < $(basename "$0") > oneview_production.json
+  # Generate production dashboard via SSH (auto-detects project ID)
+  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env production' < $(basename "$0") > oneview_PROJECT_ID_production.json
 
-  # Generate staging dashboard and save locally
-  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < $(basename "$0") > oneview_staging.json
+  # Generate staging dashboard via SSH (auto-detects project ID)
+  magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 1234567 --env staging' < $(basename "$0") > oneview_PROJECT_ID_staging.json
 
-  # Generate both dashboards to files (local execution)
+  # Generate both dashboards locally (outputs oneview_<project-id>_production.json and oneview_<project-id>_staging.json)
   $(basename "$0") --account-id 1234567 --project-id abc123xyz
 
 Finding your New Relic Account ID:
@@ -1658,14 +1658,14 @@ if [[ -n "$TARGET_ENV" ]]; then
   cat "$TEMP_FILE"
   rm -f "$TEMP_FILE"
 
-  print_info "Done. Redirect output to save: > oneview_${TARGET_ENV}.json" >&2
+  print_info "Done. Redirect output to save: > oneview_${PROJECT_ID}_${TARGET_ENV}.json" >&2
 else
   # Dual dashboard mode - write to files
   echo "" >&2
   print_header "Generating Dashboards"
 
-  PROD_FILE="${OUTPUT_DIR}/oneview_production.json"
-  STG_FILE="${OUTPUT_DIR}/oneview_staging.json"
+  PROD_FILE="${OUTPUT_DIR}/oneview_${PROJECT_ID}_production.json"
+  STG_FILE="${OUTPUT_DIR}/oneview_${PROJECT_ID}_staging.json"
 
   generate_dashboard "production" "$PROD_FILE"
   generate_dashboard "staging" "$STG_FILE"
@@ -1683,8 +1683,8 @@ else
   # Show download instructions if on cloud
   if [[ -n "${MAGENTO_CLOUD_PROJECT:-}" ]]; then
     echo -e "${BLUE}To download files from cloud:${NC}" >&2
-    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $PROD_FILE' > oneview_production.json" >&2
-    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $STG_FILE' > oneview_staging.json" >&2
+    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $PROD_FILE' > oneview_${PROJECT_ID}_production.json" >&2
+    echo "  magento-cloud ssh -p ${MAGENTO_CLOUD_PROJECT} -e \${ENV} -- 'cat $STG_FILE' > oneview_${PROJECT_ID}_staging.json" >&2
     echo "" >&2
   fi
 
@@ -1694,8 +1694,5 @@ else
   echo "  3. Click 'Import dashboard' (top right)" >&2
   echo "  4. Paste the contents of the JSON file" >&2
   echo "  5. Click 'Import dashboard'" >&2
-  echo "" >&2
-  echo -e "${YELLOW}Note:${NC} Some widgets may need adjustment based on your specific" >&2
-  echo "environment configuration (mount points, APM app names, etc.)" >&2
   echo "" >&2
 fi
