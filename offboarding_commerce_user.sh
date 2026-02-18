@@ -18,6 +18,7 @@ NC='\033[0m' # No Color
 # Default values
 TARGET_EMAIL=""
 SCAN_ONLY=false
+TARGET_PROJECT=""
 
 # Temp directory (set up after validation)
 TMP_DIR=""
@@ -30,6 +31,9 @@ ADMIN_RESULTS_FILE=""
 PROJECT_ORDER_FILE=""
 CLOUD_SCAN_FILE=""
 ADMIN_SCAN_FILE=""
+
+# Audit log
+AUDIT_LOG=""
 
 #-------------------------------------------------------------------------------
 # Helper functions
@@ -51,6 +55,13 @@ print_error() {
 
 print_warn() {
   echo -e "${YELLOW}[WARN]${NC} $1" >&2
+}
+
+# Write to audit log (no-op if AUDIT_LOG is not set)
+audit_write() {
+  if [[ -n "${AUDIT_LOG:-}" ]]; then
+    printf '%s\n' "$@" >> "$AUDIT_LOG"
+  fi
 }
 
 cleanup() {
@@ -77,6 +88,7 @@ Required:
 
 Options:
   --scan-only         Scan and report only; do not make any changes
+  --project ID        Limit scan to a single project by its ID
   -h, --help          Show this help message
 
 Examples:
@@ -85,6 +97,9 @@ Examples:
 
   # Audit only (no changes made)
   $(basename "$0") --email user@example.com --scan-only
+
+  # Target a specific project
+  $(basename "$0") --email user@example.com --project abc123xyz
 EOF
 }
 
@@ -127,6 +142,10 @@ while [[ $# -gt 0 ]]; do
       SCAN_ONLY=true
       shift
       ;;
+    --project)
+      TARGET_PROJECT="$2"
+      shift 2
+      ;;
     -h|--help)
       show_usage
       exit 0
@@ -152,6 +171,12 @@ fi
 
 if ! [[ "$TARGET_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
   print_error "Invalid email format: $TARGET_EMAIL"
+  exit 1
+fi
+
+# Reject characters that could be used for shell or PHP injection
+if [[ "$TARGET_EMAIL" =~ [\'\"\;\|\$\`\\] ]]; then
+  print_error "Email contains disallowed characters: $TARGET_EMAIL"
   exit 1
 fi
 
@@ -181,7 +206,37 @@ touch "$CLOUD_RESULTS_FILE" "$ADMIN_RESULTS_FILE" \
       "$PROJECT_ORDER_FILE" "$CLOUD_SCAN_FILE" "$ADMIN_SCAN_FILE"
 
 #-------------------------------------------------------------------------------
+# Audit log setup
+#-------------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="${SCRIPT_DIR}/offboarding_logs"
+if mkdir -p "$LOG_DIR" 2>/dev/null; then
+  SANITIZED_EMAIL=$(echo "$TARGET_EMAIL" | sed 's/@/_/g; s/[^a-zA-Z0-9._-]//g')
+  LOG_TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+  AUDIT_LOG="${LOG_DIR}/offboard_${SANITIZED_EMAIL}_${LOG_TIMESTAMP}.log"
+  {
+    echo "Offboarding Audit Log"
+    echo "====================="
+    echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo "Target email: $TARGET_EMAIL"
+    echo "Operator: $(whoami)"
+    echo "Mode: $(if [[ "$SCAN_ONLY" == true ]]; then echo 'scan-only'; else echo 'full'; fi)"
+    if [[ -n "$TARGET_PROJECT" ]]; then
+      echo "Project filter: $TARGET_PROJECT"
+    fi
+    echo ""
+  } > "$AUDIT_LOG"
+else
+  print_warn "Could not create audit log directory: $LOG_DIR"
+fi
+
+#-------------------------------------------------------------------------------
 # PHP code templates
+#
+# The target email is passed via the OFFBOARD_EMAIL environment variable
+# (base64-encoded) rather than embedded in the PHP source, to prevent
+# injection if the email contains characters like ' or ;.
 #-------------------------------------------------------------------------------
 
 # Check if admin user exists. Returns "username|email|is_active" per row.
@@ -204,8 +259,9 @@ try {
     $pdo = new PDO($dsn, $db['username'], $db['password'], [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
     ]);
+    $email = base64_decode(getenv('OFFBOARD_EMAIL'));
     $stmt = $pdo->prepare('SELECT username, email, is_active FROM admin_user WHERE LOWER(email) = LOWER(?)');
-    $stmt->execute(['__TARGET_EMAIL__']);
+    $stmt->execute([$email]);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rows as $row) {
         echo $row['username'] . '|' . $row['email'] . '|' . $row['is_active'] . "\n";
@@ -236,8 +292,9 @@ try {
     $pdo = new PDO($dsn, $db['username'], $db['password'], [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
     ]);
+    $email = base64_decode(getenv('OFFBOARD_EMAIL'));
     $stmt = $pdo->prepare('UPDATE admin_user SET is_active = 0 WHERE LOWER(email) = LOWER(?) AND is_active = 1');
-    $stmt->execute(['__TARGET_EMAIL__']);
+    $stmt->execute([$email]);
     echo "DISABLED:" . $stmt->rowCount() . "\n";
 } catch (PDOException $e) {
     fwrite(STDERR, "ERROR: " . $e->getMessage() . "\n");
@@ -249,6 +306,9 @@ PHPEOF
 # run_remote_php() - Execute PHP code on a remote environment via SSH
 # Args: $1 = project_id, $2 = environment_id, $3 = php_code
 # Returns: stdout from PHP execution, exit code from SSH
+#
+# The target email is passed as a base64-encoded OFFBOARD_EMAIL environment
+# variable to avoid injecting user input into PHP source code.
 #-------------------------------------------------------------------------------
 
 run_remote_php() {
@@ -256,11 +316,106 @@ run_remote_php() {
   local env_id="$2"
   local php_code="$3"
 
-  local encoded
-  encoded=$(echo "$php_code" | base64)
+  local encoded_php encoded_email
+  encoded_php=$(echo "$php_code" | base64)
+  encoded_email=$(printf '%s' "$TARGET_EMAIL" | base64)
 
   magento-cloud ssh -p "$project_id" -e "$env_id" --no-interaction -- \
-    "echo '$encoded' | base64 --decode | php" 2>/dev/null
+    "export OFFBOARD_EMAIL='${encoded_email}'; echo '${encoded_php}' | base64 --decode | php" 2>/dev/null
+}
+
+#-------------------------------------------------------------------------------
+# scan_project() - Scan a single project for cloud access and admin accounts
+# Args: $1 = project_id, $2 = project_title
+# Writes results to per-project temp files in $TMP_DIR.
+# Designed to run as a background job for parallel scanning.
+#-------------------------------------------------------------------------------
+
+scan_project() {
+  trap - EXIT  # Don't inherit parent's cleanup trap in subshell
+
+  local project_id="$1"
+  local project_title="$2"
+
+  local proj_cloud_scan="${TMP_DIR}/${project_id}_cloud_scan.txt"
+  local proj_admin_scan="${TMP_DIR}/${project_id}_admin_scan.txt"
+  local proj_cloud_results="${TMP_DIR}/${project_id}_cloud_results.txt"
+  local proj_admin_results="${TMP_DIR}/${project_id}_admin_results.txt"
+
+  # -- Check cloud platform access --
+  local cloud_fetch_ok=true
+  local user_list
+  user_list=$(magento-cloud user:list -p "$project_id" --format=plain --no-header --columns="email" 2>/dev/null) || {
+    cloud_fetch_ok=false
+  }
+
+  if [[ "$cloud_fetch_ok" == false ]]; then
+    echo "${project_id}|[failed]" > "$proj_cloud_scan"
+  elif echo "$user_list" | grep -Fix "$TARGET_EMAIL" &>/dev/null; then
+    echo "${project_id}|found" > "$proj_cloud_scan"
+    echo "${project_id}|${project_title}|FOUND" > "$proj_cloud_results"
+  else
+    echo "${project_id}|not found" > "$proj_cloud_scan"
+  fi
+
+  # -- Discover production and staging environments --
+  local env_fetch_ok=true
+  local env_list
+  env_list=$(magento-cloud environment:list -p "$project_id" --type=production,staging --format=plain --no-header --columns="id" 2>/dev/null) || {
+    env_fetch_ok=false
+  }
+
+  if [[ "$env_fetch_ok" == false ]]; then
+    echo "${project_id}|--|[env list failed]" > "$proj_admin_scan"
+    return 0
+  fi
+
+  if [[ -z "$env_list" ]]; then
+    echo "${project_id}|--|--" > "$proj_admin_scan"
+    return 0
+  fi
+
+  local has_env=false
+  while IFS= read -r env_id; do
+    [[ -z "$env_id" ]] && continue
+    env_id=$(echo "$env_id" | tr -d '[:space:]')
+    has_env=true
+
+    local admin_check_ok=true
+    local admin_output
+    admin_output=$(run_remote_php "$project_id" "$env_id" "$PHP_CHECK_ADMIN") || {
+      admin_check_ok=false
+    }
+
+    if [[ "$admin_check_ok" == false ]]; then
+      echo "${project_id}|${env_id}|[scan failed]" >> "$proj_admin_scan"
+      continue
+    fi
+
+    if [[ -n "$admin_output" ]]; then
+      while IFS= read -r admin_row; do
+        [[ -z "$admin_row" ]] && continue
+        local admin_username admin_is_active admin_status_label
+        admin_username=$(echo "$admin_row" | cut -d'|' -f1)
+        admin_is_active=$(echo "$admin_row" | cut -d'|' -f3)
+        if [[ "$admin_is_active" == "1" ]]; then
+          admin_status_label="active"
+        else
+          admin_status_label="inactive"
+        fi
+        echo "${project_id}|${env_id}|${admin_username} [${admin_status_label}]" >> "$proj_admin_scan"
+        echo "${project_id}|${project_title}|${env_id}|${admin_username}|${admin_is_active}" >> "$proj_admin_results"
+      done <<< "$admin_output"
+    else
+      echo "${project_id}|${env_id}|not found" >> "$proj_admin_scan"
+    fi
+  done <<< "$env_list"
+
+  if [[ "$has_env" == false ]]; then
+    echo "${project_id}|--|--" >> "$proj_admin_scan"
+  fi
+
+  return 0
 }
 
 #-------------------------------------------------------------------------------
@@ -272,6 +427,9 @@ echo "" >&2
 print_info "Target email: $TARGET_EMAIL"
 if [[ "$SCAN_ONLY" == true ]]; then
   print_warn "Scan-only mode: no changes will be made"
+fi
+if [[ -n "$TARGET_PROJECT" ]]; then
+  print_info "Project filter: $TARGET_PROJECT"
 fi
 echo "" >&2
 
@@ -289,106 +447,67 @@ if [[ -z "$PROJECT_LIST" ]]; then
   exit 1
 fi
 
+# Filter to a single project if --project was specified
+if [[ -n "$TARGET_PROJECT" ]]; then
+  FILTERED=$(echo "$PROJECT_LIST" | grep "^${TARGET_PROJECT} " || true)
+  if [[ -z "$FILTERED" ]]; then
+    print_error "Project '${TARGET_PROJECT}' not found in project list."
+    print_info "Available projects:"
+    echo "$PROJECT_LIST" | awk '{print "  " $1}' >&2
+    exit 1
+  fi
+  PROJECT_LIST="$FILTERED"
+fi
+
 PROJECT_COUNT=$(echo "$PROJECT_LIST" | wc -l | tr -d ' ')
 print_info "Found $PROJECT_COUNT project(s)"
 echo "" >&2
 
-CURRENT=0
+# Launch parallel scans with concurrency limit
+MAX_PARALLEL=5
+batch_pids=()
+completed=0
+
+printf "  Scanning: 0/%d projects completed" "$PROJECT_COUNT" >&2
+
 while IFS= read -r line; do
   PROJECT_ID=$(echo "$line" | awk '{print $1}')
   PROJECT_TITLE=$(echo "$line" | awk '{$1=""; sub(/^ +/, ""); print}')
-  CURRENT=$((CURRENT + 1))
 
   # Track project order and title
   echo "${PROJECT_ID}|${PROJECT_TITLE}" >> "$PROJECT_ORDER_FILE"
 
-  echo -e "${BLUE}[$CURRENT/$PROJECT_COUNT]${NC} ${PROJECT_TITLE} (${PROJECT_ID})" >&2
+  scan_project "$PROJECT_ID" "$PROJECT_TITLE" &
+  batch_pids+=($!)
 
-  # -- Check cloud platform access --
-  CLOUD_FETCH_OK=true
-  USER_LIST=$(magento-cloud user:list -p "$PROJECT_ID" --format=plain --no-header --columns="email" 2>/dev/null) || {
-    CLOUD_FETCH_OK=false
-  }
-
-  if [[ "$CLOUD_FETCH_OK" == false ]]; then
-    echo -e "        Cloud access:       ${YELLOW}[failed to check]${NC}" >&2
-    echo "${PROJECT_ID}|[failed]" >> "$CLOUD_SCAN_FILE"
-  elif echo "$USER_LIST" | grep -Fix "$TARGET_EMAIL" &>/dev/null; then
-    echo -e "        Cloud access:       ${RED}FOUND${NC}" >&2
-    echo "${PROJECT_ID}|found" >> "$CLOUD_SCAN_FILE"
-    echo "${PROJECT_ID}|${PROJECT_TITLE}|FOUND" >> "$CLOUD_RESULTS_FILE"
-  else
-    echo -e "        Cloud access:       ${DIM}not found${NC}" >&2
-    echo "${PROJECT_ID}|not found" >> "$CLOUD_SCAN_FILE"
+  if [[ ${#batch_pids[@]} -ge $MAX_PARALLEL ]]; then
+    for pid in "${batch_pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+    completed=$((completed + ${#batch_pids[@]}))
+    printf "\r  Scanning: %d/%d projects completed" "$completed" "$PROJECT_COUNT" >&2
+    batch_pids=()
   fi
-
-  # -- Discover production and staging environments --
-  ENV_FETCH_OK=true
-  ENV_LIST=$(magento-cloud environment:list -p "$PROJECT_ID" --type=production,staging --format=plain --no-header --columns="id" 2>/dev/null) || {
-    ENV_FETCH_OK=false
-  }
-
-  if [[ "$ENV_FETCH_OK" == false ]]; then
-    echo -e "        Admin panel:        ${YELLOW}[failed to list environments]${NC}" >&2
-    echo "${PROJECT_ID}|--|[env list failed]" >> "$ADMIN_SCAN_FILE"
-    echo "" >&2
-    continue
-  fi
-
-  if [[ -z "$ENV_LIST" ]]; then
-    echo -e "        Admin panel:        ${DIM}no environments found${NC}" >&2
-    echo "${PROJECT_ID}|--|--" >> "$ADMIN_SCAN_FILE"
-    echo "" >&2
-    continue
-  fi
-
-  HAS_ENV=false
-  while IFS= read -r env_id; do
-    [[ -z "$env_id" ]] && continue
-    env_id=$(echo "$env_id" | tr -d '[:space:]')
-    HAS_ENV=true
-
-    local_php="${PHP_CHECK_ADMIN//__TARGET_EMAIL__/$TARGET_EMAIL}"
-    ADMIN_CHECK_OK=true
-    ADMIN_OUTPUT=$(run_remote_php "$PROJECT_ID" "$env_id" "$local_php") || {
-      ADMIN_CHECK_OK=false
-    }
-
-    if [[ "$ADMIN_CHECK_OK" == false ]]; then
-      echo -e "        Admin (${env_id}):$(printf '%*s' $((14 - ${#env_id})) '')${YELLOW}[scan failed]${NC}" >&2
-      echo "${PROJECT_ID}|${env_id}|[scan failed]" >> "$ADMIN_SCAN_FILE"
-      continue
-    fi
-
-    if [[ -n "$ADMIN_OUTPUT" ]]; then
-      while IFS= read -r admin_row; do
-        [[ -z "$admin_row" ]] && continue
-        ADMIN_USERNAME=$(echo "$admin_row" | cut -d'|' -f1)
-        ADMIN_IS_ACTIVE=$(echo "$admin_row" | cut -d'|' -f3)
-        if [[ "$ADMIN_IS_ACTIVE" == "1" ]]; then
-          ADMIN_STATUS_LABEL="active"
-          ADMIN_COLOR="$RED"
-        else
-          ADMIN_STATUS_LABEL="inactive"
-          ADMIN_COLOR="$YELLOW"
-        fi
-        echo -e "        Admin (${env_id}):$(printf '%*s' $((14 - ${#env_id})) '')${ADMIN_COLOR}${ADMIN_USERNAME} [${ADMIN_STATUS_LABEL}]${NC}" >&2
-        echo "${PROJECT_ID}|${env_id}|${ADMIN_USERNAME} [${ADMIN_STATUS_LABEL}]" >> "$ADMIN_SCAN_FILE"
-        echo "${PROJECT_ID}|${PROJECT_TITLE}|${env_id}|${ADMIN_USERNAME}|${ADMIN_IS_ACTIVE}" >> "$ADMIN_RESULTS_FILE"
-      done <<< "$ADMIN_OUTPUT"
-    else
-      echo -e "        Admin (${env_id}):$(printf '%*s' $((14 - ${#env_id})) '')${DIM}not found${NC}" >&2
-      echo "${PROJECT_ID}|${env_id}|not found" >> "$ADMIN_SCAN_FILE"
-    fi
-  done <<< "$ENV_LIST"
-
-  if [[ "$HAS_ENV" == false ]]; then
-    echo -e "        Admin panel:        ${DIM}no environments found${NC}" >&2
-    echo "${PROJECT_ID}|--|--" >> "$ADMIN_SCAN_FILE"
-  fi
-
-  echo "" >&2
 done <<< "$PROJECT_LIST"
+
+# Wait for remaining jobs in the last (possibly partial) batch
+if [[ ${#batch_pids[@]} -gt 0 ]]; then
+  for pid in "${batch_pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  completed=$((completed + ${#batch_pids[@]}))
+fi
+
+printf "\r  Scanning: %d/%d projects completed\n" "$completed" "$PROJECT_COUNT" >&2
+echo "" >&2
+
+# Merge per-project results in original project order
+while IFS='|' read -r proj_id _; do
+  [[ -f "${TMP_DIR}/${proj_id}_cloud_scan.txt" ]] && cat "${TMP_DIR}/${proj_id}_cloud_scan.txt" >> "$CLOUD_SCAN_FILE"
+  [[ -f "${TMP_DIR}/${proj_id}_admin_scan.txt" ]] && cat "${TMP_DIR}/${proj_id}_admin_scan.txt" >> "$ADMIN_SCAN_FILE"
+  [[ -f "${TMP_DIR}/${proj_id}_cloud_results.txt" ]] && cat "${TMP_DIR}/${proj_id}_cloud_results.txt" >> "$CLOUD_RESULTS_FILE"
+  [[ -f "${TMP_DIR}/${proj_id}_admin_results.txt" ]] && cat "${TMP_DIR}/${proj_id}_admin_results.txt" >> "$ADMIN_RESULTS_FILE"
+done < "$PROJECT_ORDER_FILE"
 
 #-------------------------------------------------------------------------------
 # Scan report (tabular)
@@ -521,9 +640,50 @@ if [[ "$HAS_SCAN_FAILURES" == true ]]; then
   echo "" >&2
 fi
 
+# Write scan results to audit log
+if [[ -n "${AUDIT_LOG:-}" ]]; then
+  {
+    echo "Scan Results"
+    echo "============"
+    echo ""
+    printf "  %-35s  %-14s  %-14s  %-30s\n" "Project" "Cloud Access" "Environment" "Admin Account"
+    printf "  %-35s  %-14s  %-14s  %-30s\n" \
+      "-----------------------------------" "--------------" "--------------" "------------------------------"
+
+    while IFS='|' read -r pid ptitle; do
+      cstatus=$(grep "^${pid}|" "$CLOUD_SCAN_FILE" | head -1 | cut -d'|' -f2)
+      alines=$(grep "^${pid}|" "$ADMIN_SCAN_FILE" || true)
+      dtitle=$(truncate_str "$ptitle" 35)
+
+      first=true
+      if [[ -n "$alines" ]]; then
+        while IFS='|' read -r _ eid aresult; do
+          if [[ "$first" == true ]]; then
+            printf "  %-35s  %-14s  %-14s  %-30s\n" "$dtitle" "$cstatus" "$eid" "$aresult"
+            first=false
+          else
+            printf "  %-35s  %-14s  %-14s  %-30s\n" "" "" "$eid" "$aresult"
+          fi
+        done <<< "$alines"
+      else
+        printf "  %-35s  %-14s  %-14s  %-30s\n" "$dtitle" "$cstatus" "--" "--"
+      fi
+    done < "$PROJECT_ORDER_FILE"
+
+    echo ""
+    echo "Summary: ${CLOUD_FOUND_COUNT} cloud access, ${ADMIN_ACTIVE_COUNT} active admin, ${ADMIN_INACTIVE_COUNT} inactive admin across ${PROJECT_COUNT} projects"
+    echo ""
+  } >> "$AUDIT_LOG"
+fi
+
 if [[ "$FOUND_ANYTHING" == false ]]; then
   print_info "No cloud access or admin accounts found for $TARGET_EMAIL"
   print_info "Nothing to do."
+  if [[ -n "${AUDIT_LOG:-}" ]]; then
+    audit_write "No cloud access or admin accounts found. Nothing to do."
+    echo "" >&2
+    print_info "Audit log written to: $AUDIT_LOG"
+  fi
   exit 0
 fi
 
@@ -537,6 +697,10 @@ if [[ "$SCAN_ONLY" == true ]]; then
   echo -e "  To proceed with removal, run:" >&2
   echo -e "  ${BLUE}./$(basename "$0") --email ${TARGET_EMAIL}${NC}" >&2
   echo "" >&2
+  if [[ -n "${AUDIT_LOG:-}" ]]; then
+    audit_write "Scan-only mode -- no changes made."
+    print_info "Audit log written to: $AUDIT_LOG"
+  fi
   exit 0
 fi
 
@@ -559,10 +723,15 @@ echo "" >&2
 read -r -p "Proceed? (y/N): " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
   print_info "Aborted."
+  if [[ -n "${AUDIT_LOG:-}" ]]; then
+    audit_write "User aborted at confirmation prompt."
+    print_info "Audit log written to: $AUDIT_LOG"
+  fi
   exit 0
 fi
 
 echo "" >&2
+audit_write "Actions" "=======" ""
 
 #-------------------------------------------------------------------------------
 # Removal phase
@@ -588,9 +757,11 @@ if [[ "$CLOUD_COUNT" -gt 0 ]]; then
   while IFS='|' read -r proj_id proj_title _status; do
     if magento-cloud user:delete "$TARGET_EMAIL" -p "$proj_id" -y --no-interaction 2>/dev/null; then
       print_info "  Removed from ${proj_title} (${proj_id})"
+      audit_write "  [cloud] REMOVED: ${proj_title} (${proj_id})"
       CLOUD_SUCCESS=$((CLOUD_SUCCESS + 1))
     else
       print_error "  Failed to remove from ${proj_title} (${proj_id})"
+      audit_write "  [cloud] FAILED: ${proj_title} (${proj_id})"
       echo "${proj_id}|${proj_title}" >> "$CLOUD_FAILURES_FILE"
       CLOUD_FAILED=$((CLOUD_FAILED + 1))
     fi
@@ -604,14 +775,15 @@ if [[ "$ADMIN_COUNT" -gt 0 ]]; then
   while IFS='|' read -r proj_id proj_title env_id username is_active; do
     if [[ "$is_active" != "1" ]]; then
       print_warn "  Skipped ${username} on ${proj_title}/${env_id} (already inactive)"
+      audit_write "  [admin] SKIPPED: ${username} on ${proj_title}/${env_id} (already inactive)"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_SKIPS_FILE"
       ADMIN_SKIPPED=$((ADMIN_SKIPPED + 1))
       continue
     fi
 
-    local_php="${PHP_DISABLE_ADMIN//__TARGET_EMAIL__/$TARGET_EMAIL}"
-    DISABLE_OUTPUT=$(run_remote_php "$proj_id" "$env_id" "$local_php") || {
+    DISABLE_OUTPUT=$(run_remote_php "$proj_id" "$env_id" "$PHP_DISABLE_ADMIN") || {
       print_error "  Failed to disable ${username} on ${proj_title}/${env_id}"
+      audit_write "  [admin] FAILED: ${username} on ${proj_title}/${env_id}"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_FAILURES_FILE"
       ADMIN_FAILED=$((ADMIN_FAILED + 1))
       continue
@@ -621,14 +793,17 @@ if [[ "$ADMIN_COUNT" -gt 0 ]]; then
       DISABLED_COUNT=$(echo "$DISABLE_OUTPUT" | grep -o "DISABLED:[0-9]*" | cut -d: -f2)
       if [[ "$DISABLED_COUNT" -gt 0 ]]; then
         print_info "  Disabled ${username} on ${proj_title}/${env_id}"
+        audit_write "  [admin] DISABLED: ${username} on ${proj_title}/${env_id}"
         ADMIN_SUCCESS=$((ADMIN_SUCCESS + 1))
       else
         print_warn "  Skipped ${username} on ${proj_title}/${env_id} (no active rows to update)"
+        audit_write "  [admin] SKIPPED: ${username} on ${proj_title}/${env_id} (no active rows)"
         echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_SKIPS_FILE"
         ADMIN_SKIPPED=$((ADMIN_SKIPPED + 1))
       fi
     else
       print_error "  Unexpected response disabling ${username} on ${proj_title}/${env_id}"
+      audit_write "  [admin] FAILED: ${username} on ${proj_title}/${env_id} (unexpected response)"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_FAILURES_FILE"
       ADMIN_FAILED=$((ADMIN_FAILED + 1))
     fi
@@ -679,9 +854,41 @@ if [[ "$ADMIN_FAILED" -gt 0 ]]; then
   echo "" >&2
 fi
 
+# Write final report to audit log
+if [[ -n "${AUDIT_LOG:-}" ]]; then
+  {
+    echo ""
+    echo "Final Report"
+    echo "============"
+    echo ""
+    echo "Cloud platform access:"
+    echo "  Removed: $CLOUD_SUCCESS"
+    [[ "$CLOUD_FAILED" -gt 0 ]] && echo "  Failed:  $CLOUD_FAILED"
+    echo ""
+    echo "Admin panel accounts:"
+    echo "  Disabled: $ADMIN_SUCCESS"
+    [[ "$ADMIN_SKIPPED" -gt 0 ]] && echo "  Skipped:  $ADMIN_SKIPPED (already inactive)"
+    [[ "$ADMIN_FAILED" -gt 0 ]] && echo "  Failed:   $ADMIN_FAILED"
+    echo ""
+    if [[ "$CLOUD_FAILED" -gt 0 || "$ADMIN_FAILED" -gt 0 ]]; then
+      echo "Status: COMPLETED WITH ERRORS"
+    else
+      echo "Status: COMPLETED SUCCESSFULLY"
+    fi
+  } >> "$AUDIT_LOG"
+fi
+
 if [[ "$CLOUD_FAILED" -gt 0 || "$ADMIN_FAILED" -gt 0 ]]; then
   print_warn "Some actions failed. Review the details above and retry manually if needed."
+  if [[ -n "${AUDIT_LOG:-}" ]]; then
+    echo "" >&2
+    print_info "Audit log written to: $AUDIT_LOG"
+  fi
   exit 1
 fi
 
 print_info "All actions completed successfully."
+if [[ -n "${AUDIT_LOG:-}" ]]; then
+  echo "" >&2
+  print_info "Audit log written to: $AUDIT_LOG"
+fi

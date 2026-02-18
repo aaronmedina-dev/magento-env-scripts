@@ -466,12 +466,13 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 **What it does:**
 
 1. Fetches all projects from `magento-cloud project:list`
-2. Checks cloud platform access via `magento-cloud user:list` per project
+2. Scans projects in parallel (up to 5 concurrent) for cloud platform access and admin accounts
 3. SSHs into each production/staging environment and queries `admin_user` table for the target email
 4. Displays a tabular scan report with results across all projects
 5. Prompts for confirmation before making any changes
 6. Removes cloud access and disables admin accounts
 7. Displays a final report with success/failure counts
+8. Writes a persistent audit log to `offboarding_logs/`
 
 **Flags:**
 
@@ -479,6 +480,7 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 |------|-------------|
 | `--email EMAIL` | Email address of the user to offboard (required) |
 | `--scan-only` | Scan and report only; do not make any changes |
+| `--project ID` | Limit scan to a single project by its ID |
 
 **Usage:**
 
@@ -488,6 +490,12 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 
 # Audit only (no changes made)
 ./offboarding_commerce_user.sh --email user@example.com --scan-only
+
+# Target a specific project
+./offboarding_commerce_user.sh --email user@example.com --project abc123xyz
+
+# Scan a specific project only (no changes)
+./offboarding_commerce_user.sh --email user@example.com --scan-only --project abc123xyz
 ```
 
 **Requirements:**
@@ -495,6 +503,17 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 - `magento-cloud` CLI installed and authenticated (`magento-cloud auth:login`)
 - SSH access to the project environments being scanned
 - Sufficient permissions to list users and delete access on each project
+
+**Audit Log:**
+
+Each run creates a timestamped log file in `offboarding_logs/` (gitignored) with:
+
+- Timestamp, target email, operator, and mode
+- Full scan report table (plain text, no ANSI colors)
+- Actions taken with success/failure status
+- Final summary
+
+Log filename format: `offboard_<email>_<YYYYMMDD_HHMMSS>.log`
 
 **Scan Report Example:**
 
