@@ -16,6 +16,7 @@ Utilities to validate, inspect, and compare Adobe Commerce (Magento 2.x) environ
 | [`analyze_mail_logs.sh`](#analyze_mail_logssh) | Parse Postfix mail logs for delivery outcomes |
 | [`magento_health_check.sh`](#magento_health_checksh) | Deep diagnostics over configurable time window |
 | [`generate_oneview_dashboard.sh`](#generate_oneview_dashboardsh) | Generate New Relic OneView dashboard JSON files |
+| [`offboarding_commerce_user.sh`](#offboarding_commerce_usersh) | Offboard a user from all Commerce Cloud projects and admin panels |
 
 ---
 
@@ -453,6 +454,60 @@ magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 123456
 
 - New Relic UI: User menu > Administration > Access Management > Accounts
 - Or look in any existing dashboard JSON export for `accountIds`
+
+---
+
+### offboarding_commerce_user.sh
+
+Scans all Adobe Commerce Cloud projects for a user's cloud platform access and admin panel accounts across production and staging environments, then removes/disables them after confirmation.
+
+Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin panel accounts are disabled (`is_active = 0`) rather than deleted to preserve audit trails and avoid foreign key issues.
+
+**What it does:**
+
+1. Fetches all projects from `magento-cloud project:list`
+2. Checks cloud platform access via `magento-cloud user:list` per project
+3. SSHs into each production/staging environment and queries `admin_user` table for the target email
+4. Displays a tabular scan report with results across all projects
+5. Prompts for confirmation before making any changes
+6. Removes cloud access and disables admin accounts
+7. Displays a final report with success/failure counts
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--email EMAIL` | Email address of the user to offboard (required) |
+| `--scan-only` | Scan and report only; do not make any changes |
+
+**Usage:**
+
+```bash
+# Full offboard (scan + remove/disable with confirmation)
+./offboarding_commerce_user.sh --email user@example.com
+
+# Audit only (no changes made)
+./offboarding_commerce_user.sh --email user@example.com --scan-only
+```
+
+**Requirements:**
+
+- `magento-cloud` CLI installed and authenticated (`magento-cloud auth:login`)
+- SSH access to the project environments being scanned
+- Sufficient permissions to list users and delete access on each project
+
+**Scan Report Example:**
+
+The script outputs a table showing cloud access and admin account status per project:
+
+```
+  Project                              Cloud Access    Environment     Admin Account
+  -----------------------------------  --------------  --------------  ------------------------------
+  My Store Production                  found           production      admin.user [active]
+                                                       staging         admin.user [active]
+  Another Project                      not found       production      not found
+                                                       staging         not found
+```
 
 ---
 
