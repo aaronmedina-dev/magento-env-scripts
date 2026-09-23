@@ -24,3 +24,12 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Local Claude Code settings (may reference real project IDs)
+.claude/settings.local.json
+
+# Scan reports and scratch output (contain real project IDs and SSH hosts)
+scan_results/
+IGNORE/
+
+stylesmuggler_*.txt

@@ -17,6 +17,7 @@ Utilities to validate, inspect, and compare Adobe Commerce (Magento 2.x) environ
 | [`magento_health_check.sh`](#magento_health_checksh) | Deep diagnostics over configurable time window |
 | [`generate_oneview_dashboard.sh`](#generate_oneview_dashboardsh) | Generate New Relic OneView dashboard JSON files |
 | [`offboarding_commerce_user.sh`](#offboarding_commerce_usersh) | Offboard a user from all Commerce Cloud projects and admin panels |
+| [`check_stylesmuggler.sh`](#check_stylesmugglersh) | Check an environment for StyleSmuggler (Sansec) compromise indicators |
 
 ---
 
@@ -461,16 +462,20 @@ magento-cloud ssh -p PROJECT_ID -e production -- 'bash -s -- --account-id 123456
 
 Scans all Adobe Commerce Cloud projects for a user's cloud platform access and admin panel accounts across production and staging environments, then removes/disables them after confirmation.
 
-Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin panel accounts are disabled (`is_active = 0`) rather than deleted to preserve audit trails and avoid foreign key issues.
+Two independent axes control what happens: `--scope` picks which access is touched, `--admin-action` picks what happens to admin panel accounts.
+
+Cloud platform access is removed entirely via `magento-cloud user:delete`. **That call is what revokes SSH and Git access** to a project — Cloud SSH access is derived from project user membership, so removing the admin panel account alone leaves SSH intact. Use `--scope admin` when that is deliberate, and `--scope cloud` to revoke SSH/Git without touching the admin panel.
+
+By default admin accounts are disabled (`is_active = 0`) rather than deleted, to preserve audit trails and avoid foreign key issues.
 
 **What it does:**
 
 1. Fetches all projects from `magento-cloud project:list`
-2. Scans projects in parallel (up to 5 concurrent) for cloud platform access and admin accounts
+2. Scans projects in parallel (up to 5 concurrent) for cloud platform access and admin accounts (surfaces excluded by `--scope` are not scanned)
 3. SSHs into each production/staging environment and queries `admin_user` table for the target email
 4. Displays a tabular scan report with results across all projects
 5. Prompts for confirmation before making any changes
-6. Removes cloud access and disables admin accounts
+6. Applies the requested changes
 7. Displays a final report with success/failure counts
 8. Writes a persistent audit log to `offboarding_logs/`
 
@@ -479,8 +484,22 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 | Flag | Description |
 |------|-------------|
 | `--email EMAIL` | Email address of the user to offboard (required) |
+| `--scope SCOPE` | `all` (default), `admin` (admin panel only, SSH/cloud untouched), or `cloud` (SSH/cloud only, admin untouched) |
+| `--admin-action ACT` | `disable` (default), `delete`, or `password` |
 | `--scan-only` | Scan and report only; do not make any changes |
 | `--project ID` | Limit scan to a single project by its ID |
+
+**Admin actions:**
+
+| Action | Effect |
+|--------|--------|
+| `disable` | Sets `is_active = 0`. Account and audit trail are kept. Skipped if already inactive. |
+| `delete` | Removes the `admin_user` row. Irreversible; child rows go with it via `ON DELETE CASCADE`. Runs regardless of `is_active`. |
+| `password` | Rotates to a random 28-character password, **leaving the account active**. A distinct password per environment is printed once at the end and never written to the audit log. Useful for shared or service accounts, not for locking someone out. |
+
+All three actions also delete the user's `admin_user_session` rows, so a live admin session is terminated rather than just future logins blocked. `password` additionally clears `rp_token` / `rp_token_created_at` so a pending password-reset email cannot be used.
+
+The `password` action bootstraps Magento on the remote environment to hash via the installed `EncryptorInterface`, which keeps the hash format (salt and version, e.g. argon2id vs sha256) correct for that release.
 
 **Usage:**
 
@@ -491,12 +510,26 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 # Audit only (no changes made)
 ./offboarding_commerce_user.sh --email user@example.com --scan-only
 
+# Admin panel only -- SSH/cloud access left alone
+./offboarding_commerce_user.sh --email user@example.com --scope admin
+
+# Delete the admin account only
+./offboarding_commerce_user.sh --email user@example.com --scope admin --admin-action delete
+
+# Rotate the admin password only (account stays active)
+./offboarding_commerce_user.sh --email user@example.com --scope admin --admin-action password
+
+# Revoke SSH/cloud access only -- admin account left alone
+./offboarding_commerce_user.sh --email user@example.com --scope cloud
+
 # Target a specific project
 ./offboarding_commerce_user.sh --email user@example.com --project abc123xyz
 
 # Scan a specific project only (no changes)
 ./offboarding_commerce_user.sh --email user@example.com --scan-only --project abc123xyz
 ```
+
+**Not covered:** only `production` and `staging` environments are scanned for admin accounts, so admin accounts on integration branches are untouched (cloud access removal is project-wide and unaffected). API integration tokens and `oauth_token` rows are not revoked, and access outside the Cloud project — Adobe IMS / Admin Console, New Relic, Fastly — is out of scope.
 
 **Requirements:**
 
@@ -508,7 +541,7 @@ Cloud platform access is removed entirely via `magento-cloud user:delete`. Admin
 
 Each run creates a timestamped log file in `offboarding_logs/` (gitignored) with:
 
-- Timestamp, target email, operator, and mode
+- Timestamp, target email, operator, mode, scope, and admin action
 - Full scan report table (plain text, no ANSI colors)
 - Actions taken with success/failure status
 - Final summary
@@ -527,6 +560,102 @@ The script outputs a table showing cloud access and admin account status per pro
   Another Project                      not found       production      not found
                                                        staging         not found
 ```
+
+---
+
+### check_stylesmuggler.sh
+
+Checks whether an environment shows indicators of compromise from the **StyleSmuggler** campaign disclosed by Sansec ([research writeup](https://sansec.io/research/stylesmuggler)).
+
+StyleSmuggler is an unauthenticated RCE reached through the GraphQL endpoint via a crafted `styles` parameter. It injects PHP into Magento's template system, which executes when a "Payment Transaction Failed" notification email renders. The resulting implant persists via cron and masquerades as `gvfsd`, `fc-cache` and kernel `kworker` processes. All current versions were affected at disclosure, including 2.4.9, 2.4.8, 2.4.7 and 2.4.6-p15.
+
+**Read-only.** The script writes nothing to the environment: no files, no temp files, no report on disk, no processes killed, and every database statement runs inside a read-only session. Findings go to stdout — redirect locally to keep a copy. The only outbound action is a single `{__typename}` POST to the store's own GraphQL endpoint to test whether the attack surface is exposed; that request appears in the store's access log.
+
+Every section prints the commands, paths and patterns it uses *before* its result, so a clean report is auditable rather than a bare `[OK]`. The header records the project, environment, Magento version and edition, patch package versions, and the newest hotfix in `m2-hotfixes/` with its date.
+
+**What it checks:**
+
+- **Edge mitigation:** whether the StyleSmuggler vector is actually blocked. Adobe pushes its emergency rules (published as the `accord_rce` snippet) **straight to the Fastly service, leaving no file on disk**, so a filesystem check alone will wrongly report an protected store as unprotected. The scanner therefore probes the live edge with four harmless canary requests — `styles[]` in the query string, an encoded `<?`, a `{{block}}` directive in a text parameter, and the same directive in a POST body to `/graphql` — and confirms the mitigation only if they are rejected while normal traffic still returns 200. Local `var/vcl_snippets_custom/` snippets, nginx/Apache rules and `m2-hotfixes/` patches are judged **on rule content, not snippet name**, so a renamed or locally authored equivalent still counts and a snippet for an older bulletin does not
+- **Persistence:** user and system crontabs, `/etc/cron.*`, shell profiles, systemd user units, and `.magento.app.yaml` cron definitions
+- **Drop locations:** `~/.local/share/.gvfsd/`, `~/.cache/fontconfig/fc-cache`, `/tmp/.kw_*`, `/tmp/.cache_*`, `/tmp/.fc-*/fc-cache`, `/tmp/.fc_*.lock` and variants under `/var/tmp` and `/dev/shm`
+- **Binary hashes:** SHA256 of any candidate file against the four published implant hashes
+- **Processes:** kworker impersonation (verified via PPID and `/proc/<pid>/exe`, so real kernel threads are not flagged), `fc-cache` running from an unexpected path, `gvfsd-user`, and processes running from deleted binaries
+- **Network:** live connections to the published C2 addresses, NTP-shaped UDP/123 traffic from non-NTP processes, and C2 hosts pinned in `/etc/hosts`
+- **Magento artefacts:** the `x_trace_` exploitation marker in `var/report/` and `var/log/`
+- **Web logs:** exploit-shaped `graphql?styles[...]` and `paypal/transparent/response` requests, plus requests from the known attacker IP
+- **Mail volume:** delivered-message counts per day, since stage two requires a burst of failed-payment notifications
+- **Codebase:** C2 hostnames or IPs embedded in `app/`, `pub/`, `var/`, `lib/` (and `vendor/`, `generated/` with `--deep`)
+- **Webshells:** executable PHP under `pub/media`, `pub/static`, `var/*`, recently modified PHP carrying payload signatures, and drift against git HEAD
+- **Database** (`--db`): payload signatures in email templates, `core_config_data`, CMS blocks and pages, and layout updates; admin accounts and integrations created recently
+
+**Usage:**
+
+```bash
+bash check_stylesmuggler.sh [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--root PATH` | Magento root directory (default: auto-detect) |
+| `--db` | Also run read-only database checks (templates, CMS, config, admins) |
+| `--deep` | Wider sweep: includes `vendor/`, `generated/` and a filesystem-wide filename search |
+| `--days N` | Window for "recently modified" and "recently created" checks (default: 30) |
+| `--log PATH` | Additional access log file or glob to scan (repeatable) |
+| `--label NAME` | Human-readable project name for the report header |
+| `--no-probe` | Send no outbound requests; disables the edge probe and GraphQL check |
+| `--no-color` | Disable ANSI colour |
+
+> **Note on `--root`:** `run-remote.sh` guesses `/app/<project>_<env>`, which does not exist on Cloud Pro — the real root is `/app/<project>`. The scanner validates any supplied `--root` and falls back to auto-detection (via `$MAGENTO_CLOUD_DIR`, `$HOME`, then `/app/*`) when it holds no install, reporting the substitution in the header. Without that guard every application-level check silently skips while the scan still reports success.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | No indicators found |
+| `1` | No confirmed IOCs, but warnings need review |
+| `2` | Compromise indicators present |
+| `3` | Usage or environment error |
+
+**Examples:**
+
+```bash
+# Check production
+./run-remote.sh -p PROJECT_ID -e production -s check_stylesmuggler.sh
+
+# Include database checks and keep a local copy
+./run-remote.sh -p PROJECT_ID -e production -s check_stylesmuggler.sh -o stylesmuggler_prod.txt -- --db
+
+# Local, from the Magento root, with the widest sweep
+bash check_stylesmuggler.sh --db --deep --days 60
+
+# Point at access logs the script cannot auto-discover
+bash check_stylesmuggler.sh --log '/var/log/platform/*/access.log*'
+```
+
+**Scanning every project's production environment:**
+
+```bash
+magento-cloud project:list --format=plain --no-header --columns=id,title | while IFS=$'\t' read -r proj title; do
+  env=$(magento-cloud environment:list -p "$proj" --type=production \
+        --format=plain --no-header --columns=id 2>/dev/null | head -n1)
+  [ -n "$env" ] || { echo "SKIP  $proj (no production environment)"; continue; }
+
+  ./run-remote.sh -p "$proj" -e "$env" -s check_stylesmuggler.sh \
+    -o "stylesmuggler_${proj}_${env}.txt" -- --db --label "$title"
+  case $? in
+    0) echo "CLEAN       $proj / $env" ;;
+    1) echo "REVIEW      $proj / $env  -> stylesmuggler_${proj}_${env}.txt" ;;
+    2) echo "COMPROMISED $proj / $env  -> stylesmuggler_${proj}_${env}.txt" ;;
+    *) echo "ERROR       $proj / $env" ;;
+  esac
+done
+```
+
+Run serially as written: each scan takes a minute or two, and `--db` opens a connection to the production database. `--label` puts the human-readable project name in each report header.
+
+The scanner deliberately does not call `ece-patches status` or `magento-patches status` — both prompt for a patch provider and category, so they hang when driven over a non-interactive SSH pipe. Patch state is read from `m2-hotfixes/` and `composer.lock` instead.
+
+Run it on every environment, not just production — integration and staging share the same exposure. A clean result means none of the published indicators are present right now; it is not proof of safety, since log retention may be shorter than the exposure window and the implant can be updated. Apply Adobe's patch and restrict the GraphQL endpoint at the edge regardless of the outcome.
 
 ---
 

@@ -5,6 +5,10 @@ set -Eeuo pipefail
 # offboard_commerce_user.sh
 # Scans all Adobe Commerce Cloud projects for a user's cloud platform access
 # and admin panel accounts, then removes/disables them after confirmation.
+#
+# --scope selects which surfaces are touched (both, admin panel only, or cloud
+# platform only) and --admin-action selects what happens to admin accounts
+# (disable, delete, or rotate the password).
 #===============================================================================
 
 # Colors for output (sent to stderr)
@@ -19,6 +23,8 @@ NC='\033[0m' # No Color
 TARGET_EMAIL=""
 SCAN_ONLY=false
 TARGET_PROJECT=""
+SCOPE="all"            # all | admin | cloud
+ADMIN_ACTION="disable" # disable | delete | password
 
 # Temp directory (set up after validation)
 TMP_DIR=""
@@ -79,17 +85,29 @@ Scans all Adobe Commerce Cloud projects for a user's cloud platform access
 and admin panel accounts across production and staging environments, then
 removes/disables them after confirmation.
 
-Cloud platform access is removed entirely. Admin panel accounts are disabled
-(is_active = 0) rather than deleted to preserve audit trails and avoid
-foreign key issues.
+Removing cloud platform access (magento-cloud user:delete) is what revokes
+SSH and Git access to a project. Use --scope to keep that untouched and act
+on the admin panel alone.
 
 Required:
   --email EMAIL       Email address of the user to offboard
 
 Options:
+  --scope SCOPE       Which access to act on (default: all)
+                        all    - cloud platform access + admin panel
+                        admin  - admin panel only; cloud/SSH access untouched
+                        cloud  - cloud platform access only; admin untouched
+  --admin-action ACT  What to do with admin panel accounts (default: disable)
+                        disable  - set is_active = 0, keep the account
+                        delete   - remove the admin_user row entirely
+                        password - rotate to a random password, account stays
+                                   active (printed once, never logged)
   --scan-only         Scan and report only; do not make any changes
   --project ID        Limit scan to a single project by its ID
   -h, --help          Show this help message
+
+Admin actions also purge the user's admin_user_session rows so any live
+admin session is terminated, not just future logins blocked.
 
 Examples:
   # Full offboard (scan + remove/disable with confirmation)
@@ -98,9 +116,29 @@ Examples:
   # Audit only (no changes made)
   $(basename "$0") --email user@example.com --scan-only
 
+  # Disable the admin account only, leaving SSH/cloud access alone
+  $(basename "$0") --email user@example.com --scope admin
+
+  # Delete the admin account only
+  $(basename "$0") --email user@example.com --scope admin --admin-action delete
+
+  # Rotate the admin password only (e.g. a shared account)
+  $(basename "$0") --email user@example.com --scope admin --admin-action password
+
+  # Revoke SSH/cloud access only, leaving the admin account alone
+  $(basename "$0") --email user@example.com --scope cloud
+
   # Target a specific project
   $(basename "$0") --email user@example.com --project abc123xyz
 EOF
+}
+
+# Count lines matching a pattern. grep -c already prints 0 when there are no
+# matches but exits 1, so swallow the status instead of echoing a second value.
+count_matching() {
+  local count
+  count=$(grep -c "$1" "$2" 2>/dev/null || true)
+  echo "${count:-0}"
 }
 
 # Truncate a string to max length, appending .. if truncated
@@ -132,9 +170,19 @@ print_col() {
 # Parse command line arguments
 #-------------------------------------------------------------------------------
 
+# Fail with a readable message when a value-taking flag is last on the command
+# line. Without this, set -u aborts with a bare "$2: unbound variable".
+require_value() {
+  if [[ $# -lt 2 || -z "$2" ]]; then
+    print_error "Option $1 requires a value."
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --email)
+      require_value "$@"
       TARGET_EMAIL="$2"
       shift 2
       ;;
@@ -143,7 +191,18 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --project)
+      require_value "$@"
       TARGET_PROJECT="$2"
+      shift 2
+      ;;
+    --scope)
+      require_value "$@"
+      SCOPE="$2"
+      shift 2
+      ;;
+    --admin-action)
+      require_value "$@"
+      ADMIN_ACTION="$2"
       shift 2
       ;;
     -h|--help)
@@ -179,6 +238,39 @@ if [[ "$TARGET_EMAIL" =~ [\'\"\;\|\$\`\\] ]]; then
   print_error "Email contains disallowed characters: $TARGET_EMAIL"
   exit 1
 fi
+
+# The project filter is used as a grep pattern below, so keep it to literal
+# characters -- a pattern like '.*' would silently widen the run to all projects.
+if [[ -n "$TARGET_PROJECT" && ! "$TARGET_PROJECT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  print_error "Invalid project ID: $TARGET_PROJECT"
+  exit 1
+fi
+
+case "$SCOPE" in
+  all|admin|cloud) ;;
+  *)
+    print_error "Invalid --scope '$SCOPE'. Expected one of: all, admin, cloud"
+    exit 1
+    ;;
+esac
+
+case "$ADMIN_ACTION" in
+  disable|delete|password) ;;
+  *)
+    print_error "Invalid --admin-action '$ADMIN_ACTION'. Expected one of: disable, delete, password"
+    exit 1
+    ;;
+esac
+
+if [[ "$SCOPE" == "cloud" && "$ADMIN_ACTION" != "disable" ]]; then
+  print_warn "--admin-action is ignored with --scope cloud (admin accounts are not touched)."
+fi
+
+# Derived flags used throughout the scan and action phases
+DO_CLOUD=false
+DO_ADMIN=false
+[[ "$SCOPE" == "all" || "$SCOPE" == "cloud" ]] && DO_CLOUD=true
+[[ "$SCOPE" == "all" || "$SCOPE" == "admin" ]] && DO_ADMIN=true
 
 if ! command -v magento-cloud &>/dev/null; then
   print_error "magento-cloud CLI is not installed or not in PATH."
@@ -222,6 +314,10 @@ if mkdir -p "$LOG_DIR" 2>/dev/null; then
     echo "Target email: $TARGET_EMAIL"
     echo "Operator: $(whoami)"
     echo "Mode: $(if [[ "$SCAN_ONLY" == true ]]; then echo 'scan-only'; else echo 'full'; fi)"
+    echo "Scope: $SCOPE"
+    if [[ "$DO_ADMIN" == true ]]; then
+      echo "Admin action: $ADMIN_ACTION"
+    fi
     if [[ -n "$TARGET_PROJECT" ]]; then
       echo "Project filter: $TARGET_PROJECT"
     fi
@@ -239,27 +335,52 @@ fi
 # injection if the email contains characters like ' or ;.
 #-------------------------------------------------------------------------------
 
-# Check if admin user exists. Returns "username|email|is_active" per row.
-# Empty output = not found. Exit 1 on error.
-read -r -d '' PHP_CHECK_ADMIN << 'PHPEOF' || true
+# Shared preamble: defines offboard_pdo() and $email. Every snippet below is
+# concatenated onto this, so only the preamble carries the <?php tag.
+read -r -d '' PHP_PREAMBLE << 'PHPEOF' || true
 <?php
-$relationships = getenv('MAGENTO_CLOUD_RELATIONSHIPS');
-if (!$relationships) {
-    fwrite(STDERR, "ERROR: MAGENTO_CLOUD_RELATIONSHIPS not available\n");
-    exit(1);
-}
-$rels = json_decode(base64_decode($relationships), true);
-if (!isset($rels['database'][0])) {
-    fwrite(STDERR, "ERROR: No database relationship found\n");
-    exit(1);
-}
-$db = $rels['database'][0];
-$dsn = sprintf('mysql:host=%s;port=%s;dbname=%s', $db['host'], $db['port'], $db['path']);
-try {
-    $pdo = new PDO($dsn, $db['username'], $db['password'], [
+function offboard_pdo() {
+    $relationships = getenv('MAGENTO_CLOUD_RELATIONSHIPS');
+    if (!$relationships) {
+        fwrite(STDERR, "ERROR: MAGENTO_CLOUD_RELATIONSHIPS not available\n");
+        exit(1);
+    }
+    $rels = json_decode(base64_decode($relationships), true);
+    if (!isset($rels['database'][0])) {
+        fwrite(STDERR, "ERROR: No database relationship found\n");
+        exit(1);
+    }
+    $db = $rels['database'][0];
+    $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s', $db['host'], $db['port'], $db['path']);
+    return new PDO($dsn, $db['username'], $db['password'], [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
     ]);
-    $email = base64_decode(getenv('OFFBOARD_EMAIL'));
+}
+
+// Terminate any live admin session for the user. Best-effort: a missing
+// admin_user_session table must not fail the action that called this.
+function offboard_purge_sessions(PDO $pdo, $email) {
+    try {
+        $stmt = $pdo->prepare(
+            'DELETE s FROM admin_user_session s'
+            . ' INNER JOIN admin_user u ON u.user_id = s.user_id'
+            . ' WHERE LOWER(u.email) = LOWER(?)'
+        );
+        $stmt->execute([$email]);
+        echo "SESSIONS:" . $stmt->rowCount() . "\n";
+    } catch (PDOException $e) {
+        echo "SESSIONS:skipped\n";
+    }
+}
+
+$email = base64_decode(getenv('OFFBOARD_EMAIL'));
+PHPEOF
+
+# Check if admin user exists. Returns "username|email|is_active" per row.
+# Empty output = not found. Exit 1 on error.
+read -r -d '' PHP_CHECK_ADMIN_BODY << 'PHPEOF' || true
+try {
+    $pdo = offboard_pdo();
     $stmt = $pdo->prepare('SELECT username, email, is_active FROM admin_user WHERE LOWER(email) = LOWER(?)');
     $stmt->execute([$email]);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -274,54 +395,158 @@ PHPEOF
 
 # Disable admin user. Sets is_active = 0 where email matches and currently active.
 # Returns "DISABLED:N" where N is the number of rows affected.
-read -r -d '' PHP_DISABLE_ADMIN << 'PHPEOF' || true
-<?php
-$relationships = getenv('MAGENTO_CLOUD_RELATIONSHIPS');
-if (!$relationships) {
-    fwrite(STDERR, "ERROR: MAGENTO_CLOUD_RELATIONSHIPS not available\n");
-    exit(1);
-}
-$rels = json_decode(base64_decode($relationships), true);
-if (!isset($rels['database'][0])) {
-    fwrite(STDERR, "ERROR: No database relationship found\n");
-    exit(1);
-}
-$db = $rels['database'][0];
-$dsn = sprintf('mysql:host=%s;port=%s;dbname=%s', $db['host'], $db['port'], $db['path']);
+read -r -d '' PHP_DISABLE_ADMIN_BODY << 'PHPEOF' || true
 try {
-    $pdo = new PDO($dsn, $db['username'], $db['password'], [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
-    ]);
-    $email = base64_decode(getenv('OFFBOARD_EMAIL'));
+    $pdo = offboard_pdo();
     $stmt = $pdo->prepare('UPDATE admin_user SET is_active = 0 WHERE LOWER(email) = LOWER(?) AND is_active = 1');
     $stmt->execute([$email]);
-    echo "DISABLED:" . $stmt->rowCount() . "\n";
+    $affected = $stmt->rowCount();
+    if ($affected > 0) {
+        offboard_purge_sessions($pdo, $email);
+    }
+    echo "DISABLED:" . $affected . "\n";
 } catch (PDOException $e) {
     fwrite(STDERR, "ERROR: " . $e->getMessage() . "\n");
     exit(1);
 }
 PHPEOF
 
+# Delete admin user. Sessions are purged first; admin_passwords and other
+# child rows are removed by their ON DELETE CASCADE constraints.
+# Returns "DELETED:N" where N is the number of rows removed.
+read -r -d '' PHP_DELETE_ADMIN_BODY << 'PHPEOF' || true
+try {
+    $pdo = offboard_pdo();
+    offboard_purge_sessions($pdo, $email);
+    $stmt = $pdo->prepare('DELETE FROM admin_user WHERE LOWER(email) = LOWER(?)');
+    $stmt->execute([$email]);
+    echo "DELETED:" . $stmt->rowCount() . "\n";
+} catch (PDOException $e) {
+    fwrite(STDERR, "ERROR: " . $e->getMessage() . "\n");
+    exit(1);
+}
+PHPEOF
+
+# Rotate the admin user's password to the value in OFFBOARD_NEW_PASSWORD.
+#
+# Magento bootstraps here so the hash is produced by the installed
+# EncryptorInterface -- that keeps the hash format (salt and version, e.g.
+# argon2id vs sha256) exactly as this release expects instead of guessing it.
+# Reset tokens are cleared so a pending "forgot password" email cannot be used
+# to set a new password, and live sessions are terminated.
+# Returns "PASSWORD:N" where N is the number of rows updated.
+read -r -d '' PHP_PASSWORD_ADMIN_BODY << 'PHPEOF' || true
+try {
+    $newPassword = base64_decode(getenv('OFFBOARD_NEW_PASSWORD'));
+    if ($newPassword === '' || $newPassword === false) {
+        fwrite(STDERR, "ERROR: OFFBOARD_NEW_PASSWORD not available\n");
+        exit(1);
+    }
+
+    $appDir = getenv('MAGENTO_CLOUD_APP_DIR') ?: '/app';
+    if (!is_file($appDir . '/app/bootstrap.php')) {
+        fwrite(STDERR, "ERROR: Magento bootstrap not found at " . $appDir . "/app/bootstrap.php\n");
+        exit(1);
+    }
+    require $appDir . '/app/bootstrap.php';
+    $bootstrap = \Magento\Framework\App\Bootstrap::create($appDir, []);
+    $encryptor = $bootstrap->getObjectManager()
+        ->get(\Magento\Framework\Encryption\EncryptorInterface::class);
+    $hash = $encryptor->getHash($newPassword, true);
+
+    $pdo = offboard_pdo();
+    $stmt = $pdo->prepare(
+        'UPDATE admin_user SET password = ?, rp_token = NULL, rp_token_created_at = NULL'
+        . ' WHERE LOWER(email) = LOWER(?)'
+    );
+    $stmt->execute([$hash, $email]);
+    $affected = $stmt->rowCount();
+    if ($affected > 0) {
+        offboard_purge_sessions($pdo, $email);
+    }
+    echo "PASSWORD:" . $affected . "\n";
+} catch (Throwable $e) {
+    fwrite(STDERR, "ERROR: " . $e->getMessage() . "\n");
+    exit(1);
+}
+PHPEOF
+
+PHP_CHECK_ADMIN="${PHP_PREAMBLE}
+${PHP_CHECK_ADMIN_BODY}"
+PHP_DISABLE_ADMIN="${PHP_PREAMBLE}
+${PHP_DISABLE_ADMIN_BODY}"
+PHP_DELETE_ADMIN="${PHP_PREAMBLE}
+${PHP_DELETE_ADMIN_BODY}"
+PHP_PASSWORD_ADMIN="${PHP_PREAMBLE}
+${PHP_PASSWORD_ADMIN_BODY}"
+
+#-------------------------------------------------------------------------------
+# generate_password() - Generate a random password that satisfies Magento's
+# admin password rules (length plus multiple character classes).
+#-------------------------------------------------------------------------------
+
+generate_password() {
+  # Read a fixed 96 bytes rather than piping /dev/urandom into `head -c`: with
+  # pipefail, the truncating head kills the upstream reader with SIGPIPE and the
+  # non-zero pipeline status would abort the script under errexit.
+  local pool
+  pool=$(head -c 96 /dev/urandom | base64 | LC_ALL=C tr -dc 'A-Za-z0-9')
+  # Prefix guarantees one of each required character class regardless of what
+  # the random draw produced. Only shell-safe punctuation is used.
+  printf 'Aa1%s#' "${pool:0:24}"
+}
+
 #-------------------------------------------------------------------------------
 # run_remote_php() - Execute PHP code on a remote environment via SSH
-# Args: $1 = project_id, $2 = environment_id, $3 = php_code
+# Args: $1 = project_id, $2 = environment_id, $3 = php_code,
+#       $4 = optional new password (for the password rotation action)
 # Returns: stdout from PHP execution, exit code from SSH
 #
-# The target email is passed as a base64-encoded OFFBOARD_EMAIL environment
-# variable to avoid injecting user input into PHP source code.
+# The target email and the new password are passed as base64-encoded
+# OFFBOARD_EMAIL / OFFBOARD_NEW_PASSWORD environment variables rather than
+# being injected into the PHP source or the remote command line.
 #-------------------------------------------------------------------------------
 
 run_remote_php() {
   local project_id="$1"
   local env_id="$2"
   local php_code="$3"
+  local new_password="${4:-}"
 
-  local encoded_php encoded_email
+  local encoded_php encoded_email encoded_password
   encoded_php=$(echo "$php_code" | base64)
   encoded_email=$(printf '%s' "$TARGET_EMAIL" | base64)
+  encoded_password=$(printf '%s' "$new_password" | base64)
 
+  # stderr goes to a file named after the target so the caller can report why a
+  # remote call failed. run_remote_php is normally invoked inside a command
+  # substitution (a subshell), so a variable could not carry it back.
+  local err_file
+  err_file="$(remote_err_file "$project_id" "$env_id")"
+
+  # </dev/null is essential: ssh reads and forwards stdin, and every caller
+  # invokes this from inside a `while read` loop. Without it, ssh swallows the
+  # remaining environments or admin accounts and they are silently skipped.
   magento-cloud ssh -p "$project_id" -e "$env_id" --no-interaction -- \
-    "export OFFBOARD_EMAIL='${encoded_email}'; echo '${encoded_php}' | base64 --decode | php" 2>/dev/null
+    "export OFFBOARD_EMAIL='${encoded_email}' OFFBOARD_NEW_PASSWORD='${encoded_password}'; echo '${encoded_php}' | base64 --decode | php" \
+    2>"$err_file" </dev/null
+}
+
+# Path of the stderr capture file for a project/environment pair. Unique per
+# pair so parallel scans do not clobber each other.
+remote_err_file() {
+  local key
+  key=$(printf '%s_%s' "$1" "$2" | tr -c '[:alnum:]._-' '_')
+  echo "${TMP_DIR}/remote_err_${key}.txt"
+}
+
+# First line of the captured remote error, for one-line failure reporting.
+remote_err_summary() {
+  local err_file
+  err_file="$(remote_err_file "$1" "$2")"
+  if [[ -s "$err_file" ]]; then
+    head -1 "$err_file" | cut -c1-160
+  fi
 }
 
 #-------------------------------------------------------------------------------
@@ -343,19 +568,30 @@ scan_project() {
   local proj_admin_results="${TMP_DIR}/${project_id}_admin_results.txt"
 
   # -- Check cloud platform access --
-  local cloud_fetch_ok=true
-  local user_list
-  user_list=$(magento-cloud user:list -p "$project_id" --format=plain --no-header --columns="email" 2>/dev/null) || {
-    cloud_fetch_ok=false
-  }
-
-  if [[ "$cloud_fetch_ok" == false ]]; then
-    echo "${project_id}|[failed]" > "$proj_cloud_scan"
-  elif echo "$user_list" | grep -Fix "$TARGET_EMAIL" &>/dev/null; then
-    echo "${project_id}|found" > "$proj_cloud_scan"
-    echo "${project_id}|${project_title}|FOUND" > "$proj_cloud_results"
+  if [[ "$DO_CLOUD" == false ]]; then
+    echo "${project_id}|skipped" > "$proj_cloud_scan"
   else
-    echo "${project_id}|not found" > "$proj_cloud_scan"
+    local cloud_fetch_ok=true
+    local user_list
+    user_list=$(magento-cloud user:list -p "$project_id" --format=plain --no-header --columns="email" 2>/dev/null) || {
+      cloud_fetch_ok=false
+    }
+
+    if [[ "$cloud_fetch_ok" == false ]]; then
+      echo "${project_id}|[failed]" > "$proj_cloud_scan"
+    elif echo "$user_list" | grep -Fix "$TARGET_EMAIL" &>/dev/null; then
+      echo "${project_id}|found" > "$proj_cloud_scan"
+      echo "${project_id}|${project_title}|FOUND" > "$proj_cloud_results"
+    else
+      echo "${project_id}|not found" > "$proj_cloud_scan"
+    fi
+  fi
+
+  # Admin scan is the expensive part (one SSH round trip per environment), so
+  # skip it entirely when only cloud access is in scope.
+  if [[ "$DO_ADMIN" == false ]]; then
+    echo "${project_id}|--|skipped" > "$proj_admin_scan"
+    return 0
   fi
 
   # -- Discover production and staging environments --
@@ -425,6 +661,14 @@ scan_project() {
 print_header "Commerce Cloud User Offboarding"
 echo "" >&2
 print_info "Target email: $TARGET_EMAIL"
+case "$SCOPE" in
+  all)   print_info "Scope: cloud platform access + admin panel" ;;
+  admin) print_info "Scope: admin panel only (cloud/SSH access will not be touched)" ;;
+  cloud) print_info "Scope: cloud platform access only (admin panel will not be touched)" ;;
+esac
+if [[ "$DO_ADMIN" == true ]]; then
+  print_info "Admin action: $ADMIN_ACTION"
+fi
 if [[ "$SCAN_ONLY" == true ]]; then
   print_warn "Scan-only mode: no changes will be made"
 fi
@@ -537,8 +781,10 @@ FOUND_ANYTHING=false
 HAS_SCAN_FAILURES=false
 
 while IFS='|' read -r proj_id proj_title; do
-  # Look up cloud status for this project
-  CLOUD_STATUS=$(grep "^${proj_id}|" "$CLOUD_SCAN_FILE" | head -1 | cut -d'|' -f2)
+  # Look up cloud status for this project. The || true matters under pipefail:
+  # a project whose scan file never appeared would otherwise abort the script.
+  CLOUD_STATUS=$(grep "^${proj_id}|" "$CLOUD_SCAN_FILE" 2>/dev/null | head -1 | cut -d'|' -f2 || true)
+  CLOUD_STATUS="${CLOUD_STATUS:-[no result]}"
 
   # Look up admin results for this project (may be multiple lines)
   ADMIN_LINES=$(grep "^${proj_id}|" "$ADMIN_SCAN_FILE" || true)
@@ -550,8 +796,8 @@ while IFS='|' read -r proj_id proj_title; do
       CLOUD_DISPLAY="${RED}found${NC}"
       FOUND_ANYTHING=true
       ;;
-    "not found")
-      CLOUD_DISPLAY="${DIM}not found${NC}"
+    "not found"|skipped)
+      CLOUD_DISPLAY="${DIM}${CLOUD_STATUS}${NC}"
       ;;
     *)
       CLOUD_DISPLAY="${YELLOW}${CLOUD_STATUS}${NC}"
@@ -575,7 +821,7 @@ while IFS='|' read -r proj_id proj_title; do
       elif [[ "$admin_result" == *"failed"* ]]; then
         ADMIN_DISPLAY="${YELLOW}${admin_result}${NC}"
         HAS_SCAN_FAILURES=true
-      elif [[ "$admin_result" == "not found" || "$admin_result" == "--" ]]; then
+      elif [[ "$admin_result" == "not found" || "$admin_result" == "--" || "$admin_result" == "skipped" ]]; then
         ADMIN_DISPLAY="${DIM}${admin_result}${NC}"
       fi
 
@@ -624,12 +870,18 @@ done < "$PROJECT_ORDER_FILE"
 echo "" >&2
 
 # Summary counts
-CLOUD_FOUND_COUNT=$(grep -c "|found$" "$CLOUD_SCAN_FILE" 2>/dev/null || echo "0")
-ADMIN_FOUND_COUNT=$(wc -l < "$ADMIN_RESULTS_FILE" | tr -d ' ')
-ADMIN_ACTIVE_COUNT=$(grep -c '|1$' "$ADMIN_RESULTS_FILE" 2>/dev/null || echo "0")
-ADMIN_INACTIVE_COUNT=$(grep -c '|0$' "$ADMIN_RESULTS_FILE" 2>/dev/null || echo "0")
+CLOUD_FOUND_COUNT=$(count_matching "|found$" "$CLOUD_SCAN_FILE")
+ADMIN_ACTIVE_COUNT=$(count_matching '|1$' "$ADMIN_RESULTS_FILE")
+ADMIN_INACTIVE_COUNT=$(count_matching '|0$' "$ADMIN_RESULTS_FILE")
 
-echo -e "  ${BLUE}Summary:${NC} ${CLOUD_FOUND_COUNT} cloud access, ${ADMIN_ACTIVE_COUNT} active admin, ${ADMIN_INACTIVE_COUNT} inactive admin across ${PROJECT_COUNT} projects" >&2
+SUMMARY_TEXT="${CLOUD_FOUND_COUNT} cloud access, ${ADMIN_ACTIVE_COUNT} active admin, ${ADMIN_INACTIVE_COUNT} inactive admin across ${PROJECT_COUNT} projects"
+if [[ "$DO_CLOUD" == false ]]; then
+  SUMMARY_TEXT="${ADMIN_ACTIVE_COUNT} active admin, ${ADMIN_INACTIVE_COUNT} inactive admin across ${PROJECT_COUNT} projects (cloud access not scanned)"
+elif [[ "$DO_ADMIN" == false ]]; then
+  SUMMARY_TEXT="${CLOUD_FOUND_COUNT} cloud access across ${PROJECT_COUNT} projects (admin panel not scanned)"
+fi
+
+echo -e "  ${BLUE}Summary:${NC} ${SUMMARY_TEXT}" >&2
 echo "" >&2
 
 if [[ "$HAS_SCAN_FAILURES" == true ]]; then
@@ -651,7 +903,8 @@ if [[ -n "${AUDIT_LOG:-}" ]]; then
       "-----------------------------------" "--------------" "--------------" "------------------------------"
 
     while IFS='|' read -r pid ptitle; do
-      cstatus=$(grep "^${pid}|" "$CLOUD_SCAN_FILE" | head -1 | cut -d'|' -f2)
+      cstatus=$(grep "^${pid}|" "$CLOUD_SCAN_FILE" 2>/dev/null | head -1 | cut -d'|' -f2 || true)
+      cstatus="${cstatus:-[no result]}"
       alines=$(grep "^${pid}|" "$ADMIN_SCAN_FILE" || true)
       dtitle=$(truncate_str "$ptitle" 35)
 
@@ -671,16 +924,21 @@ if [[ -n "${AUDIT_LOG:-}" ]]; then
     done < "$PROJECT_ORDER_FILE"
 
     echo ""
-    echo "Summary: ${CLOUD_FOUND_COUNT} cloud access, ${ADMIN_ACTIVE_COUNT} active admin, ${ADMIN_INACTIVE_COUNT} inactive admin across ${PROJECT_COUNT} projects"
+    echo "Summary: ${SUMMARY_TEXT}"
     echo ""
   } >> "$AUDIT_LOG"
 fi
 
 if [[ "$FOUND_ANYTHING" == false ]]; then
-  print_info "No cloud access or admin accounts found for $TARGET_EMAIL"
+  case "$SCOPE" in
+    all)   NOTHING_FOUND_TEXT="No cloud access or admin accounts found" ;;
+    admin) NOTHING_FOUND_TEXT="No admin accounts found" ;;
+    cloud) NOTHING_FOUND_TEXT="No cloud access found" ;;
+  esac
+  print_info "${NOTHING_FOUND_TEXT} for $TARGET_EMAIL"
   print_info "Nothing to do."
   if [[ -n "${AUDIT_LOG:-}" ]]; then
-    audit_write "No cloud access or admin accounts found. Nothing to do."
+    audit_write "${NOTHING_FOUND_TEXT}. Nothing to do."
     echo "" >&2
     print_info "Audit log written to: $AUDIT_LOG"
   fi
@@ -692,10 +950,15 @@ fi
 #-------------------------------------------------------------------------------
 
 if [[ "$SCAN_ONLY" == true ]]; then
+  RERUN_FLAGS="--email ${TARGET_EMAIL}"
+  [[ "$SCOPE" != "all" ]] && RERUN_FLAGS="${RERUN_FLAGS} --scope ${SCOPE}"
+  [[ "$ADMIN_ACTION" != "disable" ]] && RERUN_FLAGS="${RERUN_FLAGS} --admin-action ${ADMIN_ACTION}"
+  [[ -n "$TARGET_PROJECT" ]] && RERUN_FLAGS="${RERUN_FLAGS} --project ${TARGET_PROJECT}"
+
   print_info "Scan-only mode -- no changes made."
   echo "" >&2
   echo -e "  To proceed with removal, run:" >&2
-  echo -e "  ${BLUE}./$(basename "$0") --email ${TARGET_EMAIL}${NC}" >&2
+  echo -e "  ${BLUE}./$(basename "$0") ${RERUN_FLAGS}${NC}" >&2
   echo "" >&2
   if [[ -n "${AUDIT_LOG:-}" ]]; then
     audit_write "Scan-only mode -- no changes made."
@@ -711,12 +974,28 @@ fi
 CLOUD_COUNT=$(wc -l < "$CLOUD_RESULTS_FILE" | tr -d ' ')
 ADMIN_COUNT=$(wc -l < "$ADMIN_RESULTS_FILE" | tr -d ' ')
 
+case "$ADMIN_ACTION" in
+  disable)  ADMIN_ACTION_DESC="Disable admin account(s)" ;;
+  delete)   ADMIN_ACTION_DESC="DELETE admin account(s)" ;;
+  password) ADMIN_ACTION_DESC="Rotate the password of admin account(s)" ;;
+esac
+
 echo -e "${RED}The following actions will be performed:${NC}" >&2
 if [[ "$CLOUD_COUNT" -gt 0 ]]; then
-  echo "  - Remove cloud platform access from $CLOUD_COUNT project(s)" >&2
+  echo "  - Remove cloud platform access (SSH + Git) from $CLOUD_COUNT project(s)" >&2
 fi
 if [[ "$ADMIN_COUNT" -gt 0 ]]; then
-  echo "  - Disable admin account(s) in $ADMIN_COUNT environment(s)" >&2
+  echo "  - ${ADMIN_ACTION_DESC} in $ADMIN_COUNT environment(s)" >&2
+fi
+if [[ "$DO_CLOUD" == false ]]; then
+  echo -e "  ${DIM}Cloud platform access (SSH + Git) will NOT be changed.${NC}" >&2
+fi
+if [[ "$DO_ADMIN" == false ]]; then
+  echo -e "  ${DIM}Admin panel accounts will NOT be changed.${NC}" >&2
+fi
+if [[ "$ADMIN_ACTION" == "delete" && "$ADMIN_COUNT" -gt 0 ]]; then
+  echo "" >&2
+  print_warn "Deleting admin_user rows is irreversible and loses the account's audit trail."
 fi
 echo "" >&2
 
@@ -737,7 +1016,7 @@ audit_write "Actions" "=======" ""
 # Removal phase
 #-------------------------------------------------------------------------------
 
-print_header "Removing Access"
+print_header "Applying Changes"
 echo "" >&2
 
 CLOUD_SUCCESS=0
@@ -755,7 +1034,8 @@ touch "$CLOUD_FAILURES_FILE" "$ADMIN_FAILURES_FILE" "$ADMIN_SKIPS_FILE"
 if [[ "$CLOUD_COUNT" -gt 0 ]]; then
   echo -e "${BLUE}Removing cloud platform access...${NC}" >&2
   while IFS='|' read -r proj_id proj_title _status; do
-    if magento-cloud user:delete "$TARGET_EMAIL" -p "$proj_id" -y --no-interaction 2>/dev/null; then
+    # </dev/null so the CLI cannot consume the remaining lines of this loop.
+    if magento-cloud user:delete "$TARGET_EMAIL" -p "$proj_id" -y --no-interaction 2>/dev/null </dev/null; then
       print_info "  Removed from ${proj_title} (${proj_id})"
       audit_write "  [cloud] REMOVED: ${proj_title} (${proj_id})"
       CLOUD_SUCCESS=$((CLOUD_SUCCESS + 1))
@@ -769,11 +1049,37 @@ if [[ "$CLOUD_COUNT" -gt 0 ]]; then
   echo "" >&2
 fi
 
-# Disable admin accounts
+# Act on admin accounts. The PHP snippet, its success marker and the past-tense
+# verb used in output all follow from --admin-action.
 if [[ "$ADMIN_COUNT" -gt 0 ]]; then
-  echo -e "${BLUE}Disabling admin accounts...${NC}" >&2
+  case "$ADMIN_ACTION" in
+    disable)
+      ADMIN_PHP="$PHP_DISABLE_ADMIN"
+      ADMIN_MARKER="DISABLED"
+      ADMIN_VERB="Disabled"
+      echo -e "${BLUE}Disabling admin accounts...${NC}" >&2
+      ;;
+    delete)
+      ADMIN_PHP="$PHP_DELETE_ADMIN"
+      ADMIN_MARKER="DELETED"
+      ADMIN_VERB="Deleted"
+      echo -e "${BLUE}Deleting admin accounts...${NC}" >&2
+      ;;
+    password)
+      ADMIN_PHP="$PHP_PASSWORD_ADMIN"
+      ADMIN_MARKER="PASSWORD"
+      ADMIN_VERB="Rotated password for"
+      echo -e "${BLUE}Rotating admin passwords...${NC}" >&2
+      ;;
+  esac
+
+  ADMIN_PASSWORDS_FILE="${TMP_DIR}/admin_passwords.txt"
+  touch "$ADMIN_PASSWORDS_FILE"
+
   while IFS='|' read -r proj_id proj_title env_id username is_active; do
-    if [[ "$is_active" != "1" ]]; then
+    # Only 'disable' is a no-op on an already-inactive account. Deleting or
+    # rotating the password of an inactive account is still meaningful.
+    if [[ "$ADMIN_ACTION" == "disable" && "$is_active" != "1" ]]; then
       print_warn "  Skipped ${username} on ${proj_title}/${env_id} (already inactive)"
       audit_write "  [admin] SKIPPED: ${username} on ${proj_title}/${env_id} (already inactive)"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_SKIPS_FILE"
@@ -781,28 +1087,43 @@ if [[ "$ADMIN_COUNT" -gt 0 ]]; then
       continue
     fi
 
-    DISABLE_OUTPUT=$(run_remote_php "$proj_id" "$env_id" "$PHP_DISABLE_ADMIN") || {
-      print_error "  Failed to disable ${username} on ${proj_title}/${env_id}"
-      audit_write "  [admin] FAILED: ${username} on ${proj_title}/${env_id}"
+    # A distinct password per environment, so one leaked value does not unlock
+    # the account everywhere.
+    NEW_PASSWORD=""
+    if [[ "$ADMIN_ACTION" == "password" ]]; then
+      NEW_PASSWORD=$(generate_password)
+    fi
+
+    ADMIN_OUTPUT=$(run_remote_php "$proj_id" "$env_id" "$ADMIN_PHP" "$NEW_PASSWORD") || {
+      REMOTE_ERROR=$(remote_err_summary "$proj_id" "$env_id")
+      print_error "  Failed to apply ${ADMIN_ACTION} to ${username} on ${proj_title}/${env_id}"
+      if [[ -n "$REMOTE_ERROR" ]]; then
+        print_error "    ${REMOTE_ERROR}"
+      fi
+      audit_write "  [admin] FAILED: ${username} on ${proj_title}/${env_id}${REMOTE_ERROR:+ -- ${REMOTE_ERROR}}"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_FAILURES_FILE"
       ADMIN_FAILED=$((ADMIN_FAILED + 1))
       continue
     }
 
-    if echo "$DISABLE_OUTPUT" | grep -q "^DISABLED:"; then
-      DISABLED_COUNT=$(echo "$DISABLE_OUTPUT" | grep -o "DISABLED:[0-9]*" | cut -d: -f2)
-      if [[ "$DISABLED_COUNT" -gt 0 ]]; then
-        print_info "  Disabled ${username} on ${proj_title}/${env_id}"
-        audit_write "  [admin] DISABLED: ${username} on ${proj_title}/${env_id}"
+    if echo "$ADMIN_OUTPUT" | grep -q "^${ADMIN_MARKER}:"; then
+      AFFECTED_COUNT=$(echo "$ADMIN_OUTPUT" | grep -o "${ADMIN_MARKER}:[0-9]*" | cut -d: -f2)
+      if [[ "$AFFECTED_COUNT" -gt 0 ]]; then
+        print_info "  ${ADMIN_VERB} ${username} on ${proj_title}/${env_id}"
+        audit_write "  [admin] ${ADMIN_MARKER}: ${username} on ${proj_title}/${env_id}"
+        if [[ "$ADMIN_ACTION" == "password" ]]; then
+          # Printed at the end and never written to the audit log.
+          echo "${proj_title}|${env_id}|${username}|${NEW_PASSWORD}" >> "$ADMIN_PASSWORDS_FILE"
+        fi
         ADMIN_SUCCESS=$((ADMIN_SUCCESS + 1))
       else
-        print_warn "  Skipped ${username} on ${proj_title}/${env_id} (no active rows to update)"
-        audit_write "  [admin] SKIPPED: ${username} on ${proj_title}/${env_id} (no active rows)"
+        print_warn "  Skipped ${username} on ${proj_title}/${env_id} (no rows affected)"
+        audit_write "  [admin] SKIPPED: ${username} on ${proj_title}/${env_id} (no rows affected)"
         echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_SKIPS_FILE"
         ADMIN_SKIPPED=$((ADMIN_SKIPPED + 1))
       fi
     else
-      print_error "  Unexpected response disabling ${username} on ${proj_title}/${env_id}"
+      print_error "  Unexpected response for ${username} on ${proj_title}/${env_id}"
       audit_write "  [admin] FAILED: ${username} on ${proj_title}/${env_id} (unexpected response)"
       echo "${proj_id}|${proj_title}|${env_id}|${username}" >> "$ADMIN_FAILURES_FILE"
       ADMIN_FAILED=$((ADMIN_FAILED + 1))
@@ -821,21 +1142,45 @@ echo -e "  Target: ${YELLOW}${TARGET_EMAIL}${NC}" >&2
 echo "" >&2
 
 echo -e "  ${BLUE}Cloud platform access:${NC}" >&2
-echo -e "    ${GREEN}Removed:${NC} $CLOUD_SUCCESS" >&2
-if [[ "$CLOUD_FAILED" -gt 0 ]]; then
-  echo -e "    ${RED}Failed:${NC}  $CLOUD_FAILED" >&2
+if [[ "$DO_CLOUD" == false ]]; then
+  echo -e "    ${DIM}Not in scope -- unchanged (SSH and Git access retained)${NC}" >&2
+else
+  echo -e "    ${GREEN}Removed:${NC} $CLOUD_SUCCESS" >&2
+  if [[ "$CLOUD_FAILED" -gt 0 ]]; then
+    echo -e "    ${RED}Failed:${NC}  $CLOUD_FAILED" >&2
+  fi
 fi
 echo "" >&2
 
 echo -e "  ${BLUE}Admin panel accounts:${NC}" >&2
-echo -e "    ${GREEN}Disabled:${NC} $ADMIN_SUCCESS" >&2
-if [[ "$ADMIN_SKIPPED" -gt 0 ]]; then
-  echo -e "    ${YELLOW}Skipped:${NC}  $ADMIN_SKIPPED (already inactive)" >&2
-fi
-if [[ "$ADMIN_FAILED" -gt 0 ]]; then
-  echo -e "    ${RED}Failed:${NC}   $ADMIN_FAILED" >&2
+if [[ "$DO_ADMIN" == false ]]; then
+  echo -e "    ${DIM}Not in scope -- unchanged${NC}" >&2
+else
+  case "$ADMIN_ACTION" in
+    disable)  ADMIN_RESULT_LABEL="Disabled:" ;;
+    delete)   ADMIN_RESULT_LABEL="Deleted: " ;;
+    password) ADMIN_RESULT_LABEL="Rotated: " ;;
+  esac
+  echo -e "    ${GREEN}${ADMIN_RESULT_LABEL}${NC} $ADMIN_SUCCESS" >&2
+  if [[ "$ADMIN_SKIPPED" -gt 0 ]]; then
+    echo -e "    ${YELLOW}Skipped:${NC}  $ADMIN_SKIPPED" >&2
+  fi
+  if [[ "$ADMIN_FAILED" -gt 0 ]]; then
+    echo -e "    ${RED}Failed:${NC}   $ADMIN_FAILED" >&2
+  fi
 fi
 echo "" >&2
+
+# Show rotated passwords once, on the terminal only.
+if [[ "$ADMIN_ACTION" == "password" && -s "${ADMIN_PASSWORDS_FILE:-/dev/null}" ]]; then
+  echo -e "  ${BLUE}New passwords${NC} ${DIM}(shown once, not written to the audit log)${NC}" >&2
+  while IFS='|' read -r proj_title env_id username new_password; do
+    echo -e "    ${proj_title} / ${env_id} / ${username}: ${YELLOW}${new_password}${NC}" >&2
+  done < "$ADMIN_PASSWORDS_FILE"
+  echo "" >&2
+  print_warn "The account remains active. Use --admin-action disable to lock it out instead."
+  echo "" >&2
+fi
 
 # Show details for failures
 if [[ "$CLOUD_FAILED" -gt 0 ]]; then
@@ -847,7 +1192,7 @@ if [[ "$CLOUD_FAILED" -gt 0 ]]; then
 fi
 
 if [[ "$ADMIN_FAILED" -gt 0 ]]; then
-  echo -e "  ${RED}Failed admin disables:${NC}" >&2
+  echo -e "  ${RED}Failed admin actions (${ADMIN_ACTION}):${NC}" >&2
   while IFS='|' read -r proj_id proj_title env_id username; do
     echo "    - ${proj_title} (${proj_id}) / ${env_id}: ${username}" >&2
   done < "$ADMIN_FAILURES_FILE"
@@ -862,13 +1207,21 @@ if [[ -n "${AUDIT_LOG:-}" ]]; then
     echo "============"
     echo ""
     echo "Cloud platform access:"
-    echo "  Removed: $CLOUD_SUCCESS"
-    [[ "$CLOUD_FAILED" -gt 0 ]] && echo "  Failed:  $CLOUD_FAILED"
+    if [[ "$DO_CLOUD" == false ]]; then
+      echo "  Not in scope -- unchanged (SSH and Git access retained)"
+    else
+      echo "  Removed: $CLOUD_SUCCESS"
+      [[ "$CLOUD_FAILED" -gt 0 ]] && echo "  Failed:  $CLOUD_FAILED"
+    fi
     echo ""
-    echo "Admin panel accounts:"
-    echo "  Disabled: $ADMIN_SUCCESS"
-    [[ "$ADMIN_SKIPPED" -gt 0 ]] && echo "  Skipped:  $ADMIN_SKIPPED (already inactive)"
-    [[ "$ADMIN_FAILED" -gt 0 ]] && echo "  Failed:   $ADMIN_FAILED"
+    echo "Admin panel accounts (action: ${ADMIN_ACTION}):"
+    if [[ "$DO_ADMIN" == false ]]; then
+      echo "  Not in scope -- unchanged"
+    else
+      echo "  Succeeded: $ADMIN_SUCCESS"
+      [[ "$ADMIN_SKIPPED" -gt 0 ]] && echo "  Skipped:   $ADMIN_SKIPPED"
+      [[ "$ADMIN_FAILED" -gt 0 ]] && echo "  Failed:    $ADMIN_FAILED"
+    fi
     echo ""
     if [[ "$CLOUD_FAILED" -gt 0 || "$ADMIN_FAILED" -gt 0 ]]; then
       echo "Status: COMPLETED WITH ERRORS"
